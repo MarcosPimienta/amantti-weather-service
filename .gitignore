@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env
+
+# Editor settings
+.vscode/
+.idea/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# SQLite DB (optional – comment this out if you want to keep the DB file in version control)
+*.sqlite3
+
+# Logs and output
+*.log
+
+# pytest cache
+.pytest_cache/
+
+# MyPy and coverage reports
+.mypy_cache/
+coverage/
+htmlcov/
+*.cover
+*.py,cover
