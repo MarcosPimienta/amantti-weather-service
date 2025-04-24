@@ -1,1 +1,2 @@
-#main file
+from app.db import init_db
+init_db()
