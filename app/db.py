@@ -1,8 +1,8 @@
-from sqlalchemy import create_engine, Session
-from sqlalchemy.orm import sessionmaker, WeatherLog
-from app.models import Base
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
+from app.models import WeatherLog, Base
 from datetime import datetime
-from types import List
+from typing import List
 
 DATABASE_URL = "sqlite:///./weather.db"
 
