@@ -6,13 +6,17 @@ This asynchronous Python microservice fetches real-time weather data for key cof
 
 ## 🚀 Features
 
-- Asynchronous weather data fetching using `httpx` and `asyncio`
-- Real-time insights for towns like Andes, Jardín, Betania, Salgar, and Urrao
-- Pandas-based transformation to calculate averages and detect weather anomalies
-- Data stored in a local SQLite database using SQLAlchemy ORM
-- FastAPI-based RESTful API with two endpoints:
-  - `GET /fetch_data`: Fetch, transform, and store weather data
-  - `GET /results`: Retrieve summary of latest weather insights
+- 🔄 **Asynchronous data fetching** using `httpx` and `asyncio`
+- 📡 Fetches data from OpenWeatherMap API for towns like Andes, Jardín, Betania, Urrao, etc.
+- 📊 Calculates average temperature and humidity
+- ⚠️ Flags anomalies such as:
+  - Rainfall over 10mm/hour
+  - Humidity above 95% (mold risk)
+- 🧠 Data transformation using built-in Python modules
+- 🗃️ Data storage in SQLite using SQLAlchemy ORM
+- ⚡ FastAPI-powered REST API:
+  - `GET /fetch_data` — fetch, process, and store new data
+  - `GET /results` — view latest insights and alerts
 
 ---
 
@@ -38,13 +42,32 @@ Start the FastAPI server with:
 uvicorn app.main:app --reload
 ```
 
+## 🔌 API Endpoints
+
+GET /fetch_data
+Triggers weather data fetch, transformation, and database storage
+
+Returns summary statistics and per-town alert flags
+
+GET /results
+Returns most recent weather data and aggregated metrics
+
+Useful for quick monitoring and decision making
+
+## 🕹️ Interactive API Docs
+Access the FastAPI auto-generated docs here: http://localhost:8000/docs
+
 ## ⚗️ Testing
 
 Run the test suite with:
 ```
 pytest
 ```
-Tests are located in the tests/ folder and validate data transformation and API behavior.
+Tests are located in the tests/ folder:
+
+- test_transform.py — validates alert logic for rain/mold
+
+- test_api.py — tests response structure of the /results endpoint
 
 ## 📂 Project Structure
 ```
@@ -55,14 +78,23 @@ amantti-weather-service/
 │   ├── weather.py        # Weather logic
 │   ├── models.py         # DB models
 │   ├── db.py             # DB connection
-│   └── config.py         # Env vars
+│   ├── locations.py      # JSON locations
+│   ├── config.py         # Env vars
+|   └── transform_data.py # Transforms fetched data
 ├── tests/
+│   ├── test_api.py
+|   └── test_transform.py
 ├── .env
 ├── requirements.txt
 ├── README.md
 ```
 
-## ✨ Design Highlights
-- Built for real-world use by Amantti Coffee to monitor growing conditions
-- Enables data-driven logistics and harvest planning
-- Built entirely with async Python and minimal dependencies
+## 🧠 Design Decisions
+* FastAPI for async capabilities and automatic documentation
+* httpx for modern, non-blocking HTTP requests
+* SQLAlchemy for simple, robust ORM interaction
+* Separation of Concerns:
+    * weather.py: fetch-only logic
+    * transform_data.py: alert logic and transformation
+    * db.py: handles persistence
+* No pandas required: all transformations use lightweight built-in modules
