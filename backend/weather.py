@@ -3,7 +3,7 @@ import httpx
 import asyncio
 from typing import List, Dict, Optional
 from datetime import datetime
-from app.config import get_settings
+from config import get_settings
 
 settings = get_settings()
 
