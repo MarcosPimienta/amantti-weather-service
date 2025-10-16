@@ -29,4 +29,24 @@ Thumbs.db
 coverage/
 htmlcov/
 *.cover
-*.py,cover
+*.py.cover
+
+# Node dependencies
+frontend/node_modules/
+
+# Vite cache
+frontend/dist/
+frontend/.vite/
+
+# TypeScript build cache
+frontend/tsconfig.tsbuildinfo
+
+# Logs
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# Environment
+frontend/.env
+frontend/.env.local
