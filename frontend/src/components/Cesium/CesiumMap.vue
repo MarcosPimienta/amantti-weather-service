@@ -18,12 +18,17 @@ import 'cesium/Build/Cesium/Widgets/widgets.css';
 
 const cesiumContainer = ref<HTMLElement | null>(null);
 
-onMounted(async ()=>{
+onMounted(async () => {
   if (cesiumContainer.value) {
-    Ion.defaultAccessToken = 'YOUR_CESIUM_ION_ACCESS_TOKEN';
+    Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN;
+    console.log(import.meta.env.VITE_CESIUM_ION_TOKEN);
+
     const viewer = new Viewer(cesiumContainer.value, {
-      terrainProvider: await createWorldTerrainAsync({})
+      terrainProvider: await createWorldTerrainAsync({}),
+      timeline: true,
+      animation: true,
     });
+
     if (viewer.scene) {
       // ⏳ Time-of-day simulation
       const now = JulianDate.fromDate(new Date());
@@ -61,7 +66,7 @@ onMounted(async ()=>{
 
       // 🎥 Initial camera position
       viewer.camera.setView({
-        destination: Cartesian3.fromDegrees(-74.0060, 40.7128, 15000000)
+        destination: Cartesian3.fromDegrees(-74.0060, 40.7128, 1000000) // ~3,000 km
       });
     }
   }
