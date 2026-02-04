@@ -77,7 +77,7 @@ onMounted(async () => {
         await viewer.dataSources.add(dataSource)
 
         // List of municipalities to highlight
-        const targetTowns = [
+        const rawTargetTowns = [
           'Jardín',
           'Andes',
           'Betania',
@@ -93,16 +93,36 @@ onMounted(async () => {
           'Abejorral',
           'El Retiro',
           'San Rafael',
-        ].map((t) => t.toUpperCase()) // GeoJSON usually has uppercase names
+        ]
+
+        // Normalization helper: uppercase + remove accents
+        const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+
+        // Valid GeoJSON names are usually simpler (e.g. "RETIRO" instead of "EL RETIRO")
+        const aliasMap: Record<string, string> = {
+            "EL RETIRO": "RETIRO"
+        }
+
+        const targetTowns = rawTargetTowns.map(t => {
+            const upper = t.toUpperCase()
+            return aliasMap[upper] || normalize(upper)
+        })
 
         const entities = dataSource.entities.values
         for (let i = 0; i < entities.length; i++) {
           const entity = entities[i]
           if (!entity) continue
 
-          const name = entity.properties?.NOMBRE_MPI?.getValue()
+          const rawName = entity.properties?.NOMBRE_MPI?.getValue()
+          
+          let isTarget = false
+          if (rawName && typeof rawName === 'string') {
+             // GeoJSON names might also need normalization to be safe
+             const name = normalize(rawName)
+             isTarget = targetTowns.includes(name)
+          }
 
-          if (name && typeof name === 'string' && targetTowns.includes(name)) {
+          if (isTarget) {
             // Keep visible
 
             // 🎨 Style Fill (Clamped)
