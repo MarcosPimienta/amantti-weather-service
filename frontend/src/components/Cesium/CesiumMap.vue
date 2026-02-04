@@ -1,9 +1,6 @@
-<template>
-  <div id="cesiumContainer" ref="cesiumContainer"></div>
-</template>
-
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import WeatherOverlay from '../WeatherOverlay.vue'
 import {
   Viewer,
   createWorldTerrainAsync,
@@ -13,39 +10,76 @@ import {
   Cartesian3,
   JulianDate,
   GeoJsonDataSource,
-  HeightReference,
   PolylineGraphics,
   ColorMaterialProperty,
   ConstantProperty,
   Cartographic,
   Math as CesiumMath,
   PolygonHierarchy,
+  ScreenSpaceEventHandler,
+  ScreenSpaceEventType,
+  defined,
+  type Entity,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
 const cesiumContainer = ref<HTMLElement | null>(null)
+const selectedLocation = ref<{ name: string; lat: number; lon: number; alt: number } | null>(null)
+
+// Viewer instance accessible to handleLayerSwitch
+let viewer: Viewer | null = null
+
+const handleLayerSwitch = (layerName: string) => {
+    if (!viewer || !viewer.baseLayerPicker) return
+    
+    const models = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
+    // Helper to match partial names if needed, or exact
+    let target = models.find((vm: any) => vm.name === layerName)
+    
+    // Fallback or fuzzy match for Bing
+    if (!target && layerName.includes('Bing')) {
+        target = models.find((vm: any) => vm.name.includes('Bing Maps Aerial'))
+    }
+
+    if (target) {
+        viewer.baseLayerPicker.viewModel.selectedImagery = target
+    } else {
+        console.warn(`Layer ${layerName} not found in provider list.`)
+    }
+}
 
 onMounted(async () => {
   if (cesiumContainer.value) {
     Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 
-    const viewer = new Viewer(cesiumContainer.value, {
+    // Assign to top-level variable
+    viewer = new Viewer(cesiumContainer.value, {
       terrainProvider: await createWorldTerrainAsync({}),
-      timeline: true,
-      animation: true,
+      timeline: false,
+      animation: false, // ❌ Disable Animation Dial
+      infoBox: false,
+      selectionIndicator: false,
+      // ❌ Disable Default Widgets (Top Right)
+      geocoder: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      baseLayerPicker: true, // ✅ Keep enabled for logic, hide via CSS
     })
 
     if (viewer.scene) {
-      // 🌑 Stadia Alidade Smooth Dark
-      if (viewer.baseLayerPicker) {
-         const imageryViewModels = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
-         const stadiaDark = imageryViewModels.find((vm: any) => vm.name === 'Stadia Alidade Smooth Dark')
-         if (stadiaDark) {
-           viewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
-         }
-      }
+        // 🌑 Initial Layer: Stadia
+        if (viewer.baseLayerPicker) {
+            const getProvider = (name: string) => 
+               viewer?.baseLayerPicker.viewModel.imageryProviderViewModels.find((vm: any) => vm.name === name)
 
-      // ⏳ Time-of-day simulation
+            const stadiaDark = getProvider('Stadia Alidade Smooth Dark')
+            if (stadiaDark) {
+               viewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
+            }
+        }
+
+       // ⏳ Time-of-day simulation
       const now = JulianDate.fromDate(new Date())
       const start = JulianDate.addHours(now, -12, new JulianDate())
       const stop = JulianDate.addHours(now, 12, new JulianDate())
@@ -79,12 +113,12 @@ onMounted(async () => {
         viewer.scene.sun.show = true
       }
 
-        // 🔧 Calibration Offsets (Adjust these to align map)
+       // 🔧 Calibration Offsets (Adjust these to align map)
         const LON_OFFSET = 0.03; // Positive = Shift Right (East)
         const LAT_OFFSET = -0.008; // Positive = Shift Up (North)
 
         const shiftPolygon = (entity: any) => {
-            if (entity.polygon) {
+            if (entity.polygon && viewer) { // Check viewer exists
                 const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
                 if (hierarchy) {
                     const newPositions = hierarchy.positions.map((p: Cartesian3) => {
@@ -98,6 +132,44 @@ onMounted(async () => {
             }
         };
 
+        // 👆 Click Handler for Selection
+        const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
+        handler.setInputAction((movement: any) => {
+            if (!viewer) return;
+            const pickedObject = viewer.scene.pick(movement.position);
+            
+            if (defined(pickedObject) && pickedObject.id) {
+                const entity = pickedObject.id as Entity;
+                // Check if it has a polygon (municipality)
+                if (entity.polygon || entity.polyline) { 
+                    // Retrieve Name
+                    const name = entity.properties?.NOMBRE_MPI?.getValue() || 'Unknown Town';
+                    
+                    // Retrieve approximate location from picking position on globe
+                    const cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
+                    if (cartesian) {
+                        const cartographic = Cartographic.fromCartesian(cartesian);
+                        const lat = CesiumMath.toDegrees(cartographic.latitude);
+                        const lon = CesiumMath.toDegrees(cartographic.longitude);
+                        
+                        // Approximate altitude
+                        const alt = 1250; 
+
+                        selectedLocation.value = {
+                            name,
+                            lat, 
+                            lon,
+                            alt
+                        }
+                    }
+                }
+            } else {
+                // Deselect? Or keep last selected?
+                // selectedLocation.value = null; 
+            }
+        }, ScreenSpaceEventType.LEFT_CLICK);
+
+
         // 🗺️ Load Antioquia GeoJSON
         try {
             const dataSource = await GeoJsonDataSource.load('/antioquia.geojson', {
@@ -107,137 +179,155 @@ onMounted(async () => {
 
             await viewer.dataSources.add(dataSource)
 
+            // List of municipalities to highlight
+            const rawTargetTowns = [
+            'Jardín',
+            'Andes',
+            'Betania',
+            'Ciudad Bolívar',
+            'Támesis',
+            'Urrao',
+            'Hispania',
+            'Fredonia',
+            'La Pintada',
+            'Amagá',
+            'Santa Bárbara',
+            'Venecia',
+            'Abejorral',
+            'El Retiro',
+            'San Rafael',
+            ]
 
+            // Normalization helper: uppercase + remove accents
+            const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
 
-        // List of municipalities to highlight
-        const rawTargetTowns = [
-          'Jardín',
-          'Andes',
-          'Betania',
-          'Ciudad Bolívar',
-          'Támesis',
-          'Urrao',
-          'Hispania',
-          'Fredonia',
-          'La Pintada',
-          'Amagá',
-          'Santa Bárbara',
-          'Venecia',
-          'Abejorral',
-          'El Retiro',
-          'San Rafael',
-        ]
+            // Valid GeoJSON names are usually simpler (e.g. "RETIRO" instead of "EL RETIRO")
+            const aliasMap: Record<string, string> = {
+                "EL RETIRO": "RETIRO"
+            }
 
-        // Normalization helper: uppercase + remove accents
-        const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+            const targetTowns = rawTargetTowns.map(t => {
+                const upper = t.toUpperCase()
+                return aliasMap[upper] || normalize(upper)
+            })
 
-        // Valid GeoJSON names are usually simpler (e.g. "RETIRO" instead of "EL RETIRO")
-        const aliasMap: Record<string, string> = {
-            "EL RETIRO": "RETIRO"
+            const entities = dataSource.entities.values
+            for (let i = 0; i < entities.length; i++) {
+                const entity = entities[i]
+                if (!entity) continue
+
+                const rawName = entity.properties?.NOMBRE_MPI?.getValue()
+                
+                let isTarget = false
+                if (rawName && typeof rawName === 'string') {
+                    // GeoJSON names might also need normalization to be safe
+                    const name = normalize(rawName)
+                    isTarget = targetTowns.includes(name)
+                }
+
+                if (isTarget) {
+                    // Keep visible
+
+                    // 🎨 Style Fill (Clamped)
+                    if (entity.polygon) {
+                    shiftPolygon(entity); // Apply shift before creating specific styles
+
+                    entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.1))
+                    entity.polygon.outline = new ConstantProperty(false) // Outlines don't work well on clamped polygons
+
+                    // ✏️ Create Clamped Outline using Polyline
+                    const hierarchy = entity.polygon.hierarchy?.getValue(viewer?.clock.currentTime) // Safe check
+                    if (hierarchy) {
+                        entity.polyline = new PolylineGraphics({
+                        positions: hierarchy.positions,
+                        width: 3,
+                        material: Color.CYAN,
+                        clampToGround: true,
+                        })
+                    }
+                    }
+                } else {
+                    // Hide others
+                    entity.show = false
+                }
+            }
+
+            // 🎥 Fly to Antioquia
+            viewer.camera.flyTo({
+            destination: Cartesian3.fromDegrees(-75.5, 6.5, 500000), // Approximate center of Antioquia
+            duration: 3,
+            })
+        } catch (error) {
+            console.error('Error loading GeoJSON:', error)
         }
 
-        const targetTowns = rawTargetTowns.map(t => {
-            const upper = t.toUpperCase()
-            return aliasMap[upper] || normalize(upper)
-        })
+        // 🗺️ Load Antioquia Department Outline
+        try {
+            const deptoDataSource = await GeoJsonDataSource.load('/antioquia_depto.geojson', {
+            fill: Color.TRANSPARENT,
+            clampToGround: true,
+            })
 
-        const entities = dataSource.entities.values
-        for (let i = 0; i < entities.length; i++) {
-          const entity = entities[i]
-          if (!entity) continue
+            await viewer.dataSources.add(deptoDataSource)
 
-          const rawName = entity.properties?.NOMBRE_MPI?.getValue()
-          
-          let isTarget = false
-          if (rawName && typeof rawName === 'string') {
-             // GeoJSON names might also need normalization to be safe
-             const name = normalize(rawName)
-             isTarget = targetTowns.includes(name)
-          }
-
-          if (isTarget) {
-            // Keep visible
-
-            // 🎨 Style Fill (Clamped)
+            const deptoEntities = deptoDataSource.entities.values
+            for (let i = 0; i < deptoEntities.length; i++) {
+            const entity = deptoEntities[i]
+            if (!entity) continue;
+            
             if (entity.polygon) {
-              shiftPolygon(entity); // Apply shift before creating specific styles
+                shiftPolygon(entity); // Apply shift
 
-              entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.1))
-              entity.polygon.outline = new ConstantProperty(false) // Outlines don't work well on clamped polygons
-
-              // ✏️ Create Clamped Outline using Polyline
-              const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
-              if (hierarchy) {
+                const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
+                
+                // ✏️ Create Clamped Outline using Polyline
+                if (hierarchy) {
                 entity.polyline = new PolylineGraphics({
-                  positions: hierarchy.positions,
-                  width: 3,
-                  material: Color.CYAN,
-                  clampToGround: true,
+                    positions: hierarchy.positions,
+                    width: 5,
+                    material: Color.fromCssColorString('#00BD06'),
+                    clampToGround: true,
                 })
-              }
+                }
+                
+                // ❌ Remove polygon fill to prevent blocking clicks on municipalities
+                entity.polygon = undefined
             }
-          } else {
-            // Hide others
-            entity.show = false
-          }
-        }
-
-        // 🎥 Fly to Antioquia
-        viewer.camera.flyTo({
-          destination: Cartesian3.fromDegrees(-75.5, 6.5, 500000), // Approximate center of Antioquia
-          duration: 3,
-        })
-      } catch (error) {
-        console.error('Error loading GeoJSON:', error)
-      }
-
-      // 🗺️ Load Antioquia Department Outline
-      try {
-        const deptoDataSource = await GeoJsonDataSource.load('/antioquia_depto.geojson', {
-          fill: Color.TRANSPARENT,
-          clampToGround: true,
-        })
-
-        await viewer.dataSources.add(deptoDataSource)
-
-        const deptoEntities = deptoDataSource.entities.values
-        for (let i = 0; i < deptoEntities.length; i++) {
-          const entity = deptoEntities[i]
-          if (!entity) continue;
-          
-          if (entity.polygon) {
-            shiftPolygon(entity); // Apply shift
-
-            const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
-            
-            // ✏️ Create Clamped Outline using Polyline
-            if (hierarchy) {
-              entity.polyline = new PolylineGraphics({
-                positions: hierarchy.positions,
-                width: 5,
-                material: Color.fromCssColorString('#00BD06'),
-                clampToGround: true,
-              })
             }
-            
-            // ❌ Remove polygon fill to prevent blocking clicks on municipalities
-            entity.polygon = undefined
-          }
+        } catch (error) {
+            console.error('Error loading Department GeoJSON:', error)
         }
-      } catch (error) {
-        console.error('Error loading Department GeoJSON:', error)
-      }
     }
   }
 })
 </script>
 
+<template>
+  <div class="cesium-wrapper">
+    <div id="cesiumContainer" ref="cesiumContainer"></div>
+    <WeatherOverlay :location="selectedLocation" @switch-layer="handleLayerSwitch" />
+  </div>
+</template>
+
 <style scoped>
-#cesiumContainer {
+.cesium-wrapper {
+  position: relative;
   width: 100%;
   height: 100vh;
+}
+#cesiumContainer {
+  width: 100%;
+  height: 100%;
   margin: 0;
   padding: 0;
   overflow: hidden;
+}
+
+/* 🚫 Hide Default Cesium UI Elements */
+:deep(.cesium-viewer-toolbar),
+:deep(.cesium-viewer-animationContainer),
+:deep(.cesium-viewer-timelineContainer),
+:deep(.cesium-viewer-fullscreenContainer) {
+  display: none !important;
 }
 </style>
