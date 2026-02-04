@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue' // 📍 Added watch
 import WeatherOverlay from '../WeatherOverlay.vue'
-// ... imports ...
 import {
   Viewer,
   createWorldTerrainAsync,
@@ -21,9 +20,10 @@ import {
   ScreenSpaceEventType,
   defined,
   type Entity,
-  CustomDataSource, // Added
-  BoxGraphics, // Added
-  BoundingSphere, // Added
+  CustomDataSource, 
+  BoxGraphics, 
+  BoundingSphere, 
+  HeightReference, 
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -36,6 +36,7 @@ let viewer: Viewer | null = null
 
 // Data Source for 3D Bars
 let barDataSource: CustomDataSource | null = null
+let municipalitiesDataSource: GeoJsonDataSource | null = null // 📍 Added reliable reference
 
 // Mock Data Cache to keep values consistent
 const townDataCache: Record<string, { temp: number, rain: number, humidity: number }> = {}
@@ -52,7 +53,6 @@ const getTownData = (townName: string) => {
 }
 
 const handleLayerSwitch = (layerName: string) => {
-   // ... existing layer switch logic ...
     if (!viewer || !viewer.baseLayerPicker) return
     
     const models = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
@@ -64,12 +64,19 @@ const handleLayerSwitch = (layerName: string) => {
         viewer.baseLayerPicker.viewModel.selectedImagery = target
     }
 }
-
-// 📊 Render 3D Bars based on Mode
 const renderDataBars = async () => {
     if (!viewer || !barDataSource) return;
     
+    // Debug log
+    console.log(`[BarDebug] Render called. Mode: ${currentWeatherMode.value}`);
+
     barDataSource.entities.removeAll();
+
+    // 🔒 Filter: Only show if a location is selected
+    if (!selectedLocation.value) {
+        console.log("[BarDebug] No location selected. Clearing bars.");
+        return;
+    }
 
     const mode = currentWeatherMode.value;
     // Scalar configs
@@ -82,27 +89,35 @@ const renderDataBars = async () => {
     // @ts-ignore
     const cfg = config[mode] || config['clear'];
 
-    // We need to find the entities corresponding to target towns again
-    // In a real app, we might store these entities in a map during the first load loop
-    // For now, let's iterate the GeoJSON source again if available
-    const geoJsonSource = viewer.dataSources.get(0); // Assuming it's the first one or we find by name
-    if (!geoJsonSource) return;
+    // Use specific data source
+    if (!municipalitiesDataSource) {
+        console.warn("[BarDebug] No municipalities data source found yet.");
+        return;
+    }
 
-    const entities = geoJsonSource.entities.values;
+    const entities = municipalitiesDataSource.entities.values;
+    // console.log(`[BarDebug] Processing ${entities.length} entities from GeoJSON.`);
     
-    // Re-use target towns list logic or just check all suitable polygons
+    let barsAdded = 0;
+
     for (let i = 0; i < entities.length; i++) {
         const entity = entities[i];
-        if (!entity?.polygon || !entity.show) continue; // Skip hidden/non-polygon
+        if (!entity?.polygon) continue; 
         
         const rawName = entity.properties?.NOMBRE_MPI?.getValue();
         if (!rawName) continue;
+
+        // 🎯 Exact Match Filter: Only show for selected town
+        // Note: selectedLocation.value.name comes from the same property, so strict match works
+        // But let's be safe with trimming/normalization if needed. 
+        // For now, assume exact match as they come from same source.
+        if (rawName !== selectedLocation.value.name) continue;
 
         const data = getTownData(rawName);
         // @ts-ignore
         const value = data[cfg.prop];
 
-        if (value <= 0) continue; // Don't draw 0-height bars
+        if (value <= 0) continue; 
 
         // Calculate Centroid
         const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
@@ -113,30 +128,37 @@ const renderDataBars = async () => {
 
             // Height calculation
             const barHeight = value * cfg.scale;
+            console.log(`[BarDebug] Adding bar for ${rawName}: Val=${value.toFixed(1)}, H=${barHeight.toFixed(0)}`);
             
             // Create Bar Entity
             barDataSource.entities.add({
                 position: Cartesian3.fromRadians(
                     Cartographic.fromCartesian(center).longitude,
                     Cartographic.fromCartesian(center).latitude,
-                    barHeight / 2 // Box is centered, so push it up by half height? Actually usually center + half height
-                    // But if we put position on surface, box extends down. 
-                    // Better: position at surface + half height.
+                    (barHeight / 2) - 50 // ⚓ Sink 50m to anchor in terrain and prevent floating
                 ),
                 box: {
-                    dimensions: new Cartesian3(2000, 2000, barHeight), // 2km wide bars
+                    dimensions: new Cartesian3(2000, 2000, barHeight), 
                     material: cfg.color,
-                    outline: false
+                    outline: false,
+                    heightReference: HeightReference.RELATIVE_TO_GROUND 
                 }
             });
+            barsAdded++;
         }
     }
+    console.log(`[BarDebug] Total bars added: ${barsAdded}`);
 }
 
 const handleWeatherMode = (mode: string) => {
     currentWeatherMode.value = mode;
     renderDataBars();
 }
+
+// 👀 Watch for Selection Changes to update bars
+watch(selectedLocation, () => {
+    renderDataBars();
+})
 
 onMounted(async () => {
   if (cesiumContainer.value) {
@@ -284,6 +306,7 @@ onMounted(async () => {
             })
 
             await viewer.dataSources.add(dataSource)
+            municipalitiesDataSource = dataSource // 📍 Store reference
 
             // List of municipalities to highlight
             const rawTargetTowns = [
