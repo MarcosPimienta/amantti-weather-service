@@ -23,7 +23,13 @@ import {
   CustomDataSource, 
   BoxGraphics, 
   BoundingSphere, 
-  HeightReference, 
+  HeightReference,
+  ImageMaterialProperty,
+  MaterialProperty,
+  ParticleSystem,
+  BoxEmitter,
+  Cartesian2,
+  Transforms
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -34,6 +40,9 @@ const currentWeatherData = ref<{ temp: number; rain: number; humidity: number } 
 
 // Viewer instance accessible 
 let cesiumViewer: Viewer | null = null
+
+// Rain System
+let rainSystem: ParticleSystem | null = null
 
 // Data Source for 3D Bars
 let barDataSource: CustomDataSource | null = null
@@ -66,6 +75,134 @@ const handleLayerSwitch = (layerName: string) => {
     }
 }
 
+
+
+const interpolateColor = (color1: string, color2: string, factor: number) => {
+    // Simple RGB interpolation
+    const c1 = Color.fromCssColorString(color1);
+    const c2 = Color.fromCssColorString(color2);
+    const result = Color.lerp(c1, c2, factor, new Color());
+    return result.toCssColorString();
+}
+
+const createRainCanvas = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0)';
+    ctx.fillRect(0, 0, 32, 32);
+
+    ctx.fillStyle = 'rgba(220, 230, 255, 0.8)';
+    ctx.beginPath();
+    ctx.moveTo(14, 0);
+    ctx.lineTo(18, 0);
+    ctx.lineTo(16, 32);
+    ctx.fill();
+    
+    return canvas;
+}
+
+const currentRainRadius = ref(1500.0);
+
+const refreshRainEffect = () => {
+    if (!cesiumViewer) return;
+    
+    // Always remove existing first to handle updates
+    if (rainSystem) {
+        cesiumViewer.scene.primitives.remove(rainSystem);
+        rainSystem = null;
+    }
+
+    const location = selectedLocation.value;
+    const data = currentWeatherData.value;
+    
+    // Conditions to show rain:
+    // 1. Location selected
+    // 2. Data available with rain > 0
+    // 3. 'rain' mode is active
+    if (!location || !data || data.rain <= 0 || !currentWeatherMode.value.includes('rain')) {
+        return;
+    }
+
+    // Rain Logic
+    const position = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + 2500); // Higher start
+    const modelMatrix = Transforms.eastNorthUpToFixedFrame(position);
+    
+    // Scale intensity
+    const emissionRate = Math.min(Math.max(data.rain * 5, 10), 300); 
+    const speed = 10.0;
+    const radius = currentRainRadius.value;
+
+    rainSystem = new ParticleSystem({
+        image: createRainCanvas(),
+        startColor: Color.WHITE.withAlpha(0.6),
+        endColor: Color.WHITE.withAlpha(0.0),
+        startScale: 1.0,
+        endScale: 1.0,
+        minimumParticleLife: 3.0, // Longer life for higher altitude
+        maximumParticleLife: 3.0,
+        minimumSpeed: speed * 0.8,
+        maximumSpeed: speed * 1.2,
+        imageSize: new Cartesian2(6, 20),
+        emissionRate: emissionRate,
+        // BoxEmitter for uniform distribution (Square area)
+        emitter: new BoxEmitter(new Cartesian3(radius * 1.4, radius * 1.4, 2500.0)), 
+        lifetime: 16.0,
+        modelMatrix: modelMatrix,
+        updateCallback: (particle: any, dt: number) => {
+           // Emulate gravity
+           particle.velocity.z = -speed; // Force down in local coords
+           particle.velocity.x = 0;
+           particle.velocity.y = 0;
+        }
+    });
+    
+    cesiumViewer.scene.primitives.add(rainSystem);
+}
+
+
+
+const createTempBarGradient = (temp: number, maxTemp: number = 50) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 64;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    const ratio = Math.min(Math.max(temp / maxTemp, 0), 1);
+    
+    // Gradient from 0 to Ratio of the full scale
+    // Full Scale: 0.0 (Blue) -> 0.5 (Yellow) -> 1.0 (Red)
+    
+    const grad = ctx.createLinearGradient(0, 256, 0, 0); // Bottom to Top
+    
+    // Always start at Blue
+    grad.addColorStop(0, 'blue');
+    
+    if (ratio <= 0.5) {
+        // Range is [0, ratio] which is sub-segment of [0, 0.5] (Blue->Yellow)
+        // End color is interp(Blue, Yellow, ratio / 0.5)
+        const endColor = interpolateColor('blue', 'yellow', ratio / 0.5);
+        grad.addColorStop(1, endColor);
+    } else {
+        // Range crosses Yellow (0.5)
+        // Yellow happens at 0.5 / ratio in local space
+        const yellowPos = 0.5 / ratio;
+        grad.addColorStop(yellowPos, 'yellow');
+        
+        // End color is interp(Yellow, Red, (ratio - 0.5) / 0.5)
+        const endColor = interpolateColor('yellow', 'red', (ratio - 0.5) / 0.5);
+        grad.addColorStop(1, endColor);
+    }
+
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 64, 256);
+    return canvas;
+}
+
 const renderDataBars = async () => {
     if (!cesiumViewer || !barDataSource) return;
     
@@ -85,10 +222,18 @@ const renderDataBars = async () => {
 
     // Scalar configs with Offsets (in degrees, approx)
     // 0.015 degrees is roughly ~1.5km at equator, good enough for separation
-    type ModeConfig = { scale: number; color: Color; prop: 'temp' | 'rain' | 'humidity'; label: string; offsetLon: number; offsetLat: number };
+    type ModeConfig = { scale: number; color: Color; material?: MaterialProperty; prop: 'temp' | 'rain' | 'humidity'; label: string; offsetLon: number; offsetLat: number };
     
     const config: Record<string, ModeConfig> = {
-        'clear': { scale: 200, color: Color.ORANGE, prop: 'temp', label: 'Temp', offsetLon: 0, offsetLat: 0 }, 
+        'clear': { 
+            scale: 200, 
+            color: Color.ORANGE, 
+            // Material will be generated dynamically
+            prop: 'temp', 
+            label: 'Temp', 
+            offsetLon: 0, 
+            offsetLat: 0 
+        }, 
         'rain': { scale: 500, color: Color.DEEPSKYBLUE, prop: 'rain', label: 'Rain', offsetLon: 0.015, offsetLat: 0 },
         'humidity': { scale: 100, color: Color.WHITESMOKE.withAlpha(0.8), prop: 'humidity', label: 'Hum', offsetLon: -0.015, offsetLat: 0 }
     }
@@ -145,6 +290,17 @@ const renderDataBars = async () => {
                  
                  console.log(`[BarDebug] Adding bar for ${rawName} [${mode}]: Val=${value.toFixed(1)}`);
                  
+                 let material: MaterialProperty | Color = cfg.color;
+                 if (mode === 'clear') {
+                     // 🌡️ Dynamic Heat Gradient
+                     material = new ImageMaterialProperty({
+                         image: createTempBarGradient(value, 50), // Max 50C
+                         transparent: true
+                     });
+                 } else if (cfg.material) {
+                     material = cfg.material;
+                 }
+
                  // Create Bar Entity
                  barDataSource.entities.add({
                      position: Cartesian3.fromRadians(
@@ -154,7 +310,7 @@ const renderDataBars = async () => {
                      ),
                      box: {
                          dimensions: new Cartesian3(1500, 1500, barHeight), // Slightly thinner bars to fit side-by-side
-                         material: cfg.color,
+                         material: material,
                          outline: false,
                          heightReference: HeightReference.CLAMP_TO_GROUND
                      }
@@ -168,17 +324,42 @@ const renderDataBars = async () => {
 
 const handleWeatherMode = (modes: string[]) => {
     currentWeatherMode.value = modes;
+    refreshRainEffect();
     renderDataBars();
 }
 
 // 👀 Watch for Selection Changes to update bars
 watch(selectedLocation, (newLoc) => {
     if (newLoc) {
-        currentWeatherData.value = getTownData(newLoc.name)
+        const data = getTownData(newLoc.name);
+        currentWeatherData.value = data;
+
+        // 📏 Calculate Radius from Municipality Geometry
+        if (municipalitiesDataSource) {
+             const entities = municipalitiesDataSource.entities.values;
+             const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+             
+             // Find matching entity
+             const entity = entities.find(e => {
+                 const raw = e.properties?.NOMBRE_MPI?.getValue();
+                 return raw && normalize(raw) === normalize(newLoc.name);
+             });
+
+             if (entity && entity.polygon && cesiumViewer) {
+                 const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
+                 if (hierarchy) {
+                     const bs = BoundingSphere.fromPoints(hierarchy.positions);
+                     currentRainRadius.value = bs.radius * 0.9; 
+                     console.log(`[Rain] Auto-radius for ${newLoc.name}: ${currentRainRadius.value.toFixed(0)}m`);
+                 }
+             } else {
+                currentRainRadius.value = 1500.0;
+             }
+        }
     } else {
-        currentWeatherData.value = null
+        currentWeatherData.value = null;
     }
-    renderDataBars();
+    refreshRainEffect();
     renderDataBars();
 })
 
@@ -216,6 +397,7 @@ onMounted(async () => {
         
         // 📊 Add Custom Data Source for Bars
         barDataSource = new CustomDataSource('bars');
+        
         cesiumViewer.dataSources.add(barDataSource);
 
         // ... (existing logic) ...
