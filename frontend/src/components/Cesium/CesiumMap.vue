@@ -29,7 +29,7 @@ import 'cesium/Build/Cesium/Widgets/widgets.css'
 
 const cesiumContainer = ref<HTMLElement | null>(null)
 const selectedLocation = ref<{ name: string; lat: number; lon: number; alt: number } | null>(null)
-const currentWeatherMode = ref('clear') // Default mode
+const currentWeatherMode = ref<string[]>(['clear']) // Default mode
 
 // Viewer instance accessible 
 let viewer: Viewer | null = null
@@ -64,11 +64,12 @@ const handleLayerSwitch = (layerName: string) => {
         viewer.baseLayerPicker.viewModel.selectedImagery = target
     }
 }
+
 const renderDataBars = async () => {
     if (!viewer || !barDataSource) return;
     
     // Debug log
-    console.log(`[BarDebug] Render called. Mode: ${currentWeatherMode.value}`);
+    console.log(`[BarDebug] Render called. Modes: ${currentWeatherMode.value.join(', ')}`);
 
     barDataSource.entities.removeAll();
 
@@ -78,17 +79,19 @@ const renderDataBars = async () => {
         return;
     }
 
-    const mode = currentWeatherMode.value;
-    // Scalar configs
-    const config = {
-        'clear': { scale: 200, color: Color.ORANGE, prop: 'temp', label: 'Temp' }, // Height = val * 200
-        'rain': { scale: 500, color: Color.DEEPSKYBLUE, prop: 'rain', label: 'Rain' },
-        'humidity': { scale: 100, color: Color.WHITESMOKE.withAlpha(0.8), prop: 'humidity', label: 'Hum' }
+    const activeModes = currentWeatherMode.value;
+    if (activeModes.length === 0) return;
+
+    // Scalar configs with Offsets (in degrees, approx)
+    // 0.015 degrees is roughly ~1.5km at equator, good enough for separation
+    type ModeConfig = { scale: number; color: Color; prop: 'temp' | 'rain' | 'humidity'; label: string; offsetLon: number; offsetLat: number };
+    
+    const config: Record<string, ModeConfig> = {
+        'clear': { scale: 200, color: Color.ORANGE, prop: 'temp', label: 'Temp', offsetLon: 0, offsetLat: 0 }, 
+        'rain': { scale: 500, color: Color.DEEPSKYBLUE, prop: 'rain', label: 'Rain', offsetLon: 0.015, offsetLat: 0 },
+        'humidity': { scale: 100, color: Color.WHITESMOKE.withAlpha(0.8), prop: 'humidity', label: 'Hum', offsetLon: -0.015, offsetLat: 0 }
     }
     
-    // @ts-ignore
-    const cfg = config[mode] || config['clear'];
-
     // Use specific data source
     if (!municipalitiesDataSource) {
         console.warn("[BarDebug] No municipalities data source found yet.");
@@ -96,7 +99,6 @@ const renderDataBars = async () => {
     }
 
     const entities = municipalitiesDataSource.entities.values;
-    // console.log(`[BarDebug] Processing ${entities.length} entities from GeoJSON.`);
     
     let barsAdded = 0;
 
@@ -108,55 +110,63 @@ const renderDataBars = async () => {
         if (!rawName) continue;
 
         // 🎯 Exact Match Filter: Only show for selected town
-        // Note: selectedLocation.value.name comes from the same property, so strict match works
-        // But let's be safe with trimming/normalization if needed. 
-        // For now, assume exact match as they come from same source.
         if (rawName !== selectedLocation.value.name) continue;
 
         const data = getTownData(rawName);
-        // @ts-ignore
-        const value = data[cfg.prop];
 
-        if (value <= 0) continue; 
+        // Iterate over all active modes
+        for (const mode of activeModes) {
+             const cfg = config[mode];
+             if (!cfg) continue;
 
-        // Calculate Centroid
-        const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
-        if (hierarchy) {
-            const positions = hierarchy.positions;
-            const boundingSphere = BoundingSphere.fromPoints(positions);
-            const center = boundingSphere.center;
+             const value = data[cfg.prop];
 
-            // Height calculation
-            // ⚓ Anchor Trick: Double the height and Clamp to Ground. 
-            // This centers the box on the terrain surface.
-            // Result: Bottom half is buried, Top half is visible.
-            // Visible Height = (Value * Scale * 2) / 2 = Value * Scale.
-            const barHeight = value * cfg.scale * 2;
-            
-            console.log(`[BarDebug] Adding anchored bar for ${rawName}: VisH=${(barHeight/2).toFixed(0)}`);
-            
-            // Create Bar Entity
-            barDataSource.entities.add({
-                position: Cartesian3.fromRadians(
-                    Cartographic.fromCartesian(center).longitude,
-                    Cartographic.fromCartesian(center).latitude,
-                    0 // Height ignored by CLAMP_TO_GROUND
-                ),
-                box: {
-                    dimensions: new Cartesian3(2000, 2000, barHeight), 
-                    material: cfg.color,
-                    outline: false,
-                    heightReference: HeightReference.CLAMP_TO_GROUND // 🔒 Center on terrain
-                }
-            });
-            barsAdded++;
+             if (value <= 0) continue; 
+
+             // Calculate Centroid
+             const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
+             if (hierarchy) {
+                 const positions = hierarchy.positions;
+                 const boundingSphere = BoundingSphere.fromPoints(positions);
+                 const center = boundingSphere.center;
+                 
+                 const carto = Cartographic.fromCartesian(center);
+                 const shiftedLon = carto.longitude + CesiumMath.toRadians(cfg.offsetLon * (180/Math.PI)); // Convert offset deg to rad? No, offset is in degrees, so convert scale.
+                 // Wait, carto.longitude is in Radians. 
+                 // My offsetLon is in Degrees.
+                 // So: newLonRad = oldLonRad + toRadians(offsetDeg)
+                 
+                 const finalLon = carto.longitude + CesiumMath.toRadians(cfg.offsetLon);
+                 const finalLat = carto.latitude + CesiumMath.toRadians(cfg.offsetLat);
+
+                 // Height calculation
+                 const barHeight = value * cfg.scale * 2;
+                 
+                 console.log(`[BarDebug] Adding bar for ${rawName} [${mode}]: Val=${value.toFixed(1)}`);
+                 
+                 // Create Bar Entity
+                 barDataSource.entities.add({
+                     position: Cartesian3.fromRadians(
+                         finalLon,
+                         finalLat,
+                         0
+                     ),
+                     box: {
+                         dimensions: new Cartesian3(1500, 1500, barHeight), // Slightly thinner bars to fit side-by-side
+                         material: cfg.color,
+                         outline: false,
+                         heightReference: HeightReference.CLAMP_TO_GROUND
+                     }
+                 });
+                 barsAdded++;
+             }
         }
     }
     console.log(`[BarDebug] Total bars added: ${barsAdded}`);
 }
 
-const handleWeatherMode = (mode: string) => {
-    currentWeatherMode.value = mode;
+const handleWeatherMode = (modes: string[]) => {
+    currentWeatherMode.value = modes;
     renderDataBars();
 }
 

@@ -8,25 +8,25 @@
         <div class="atmosphere-icons">
           <div 
             class="icon-circle" 
-            :class="{ active: activeWeatherMode === 'clear' }"
+            :class="{ active: activeWeatherModes.includes('clear') }"
             title="Clear Sky"
-            @click="setWeatherMode('clear')"
+            @click="toggleWeatherMode('clear')"
           >
             ☀️
           </div>
           <div 
             class="icon-circle" 
-            :class="{ active: activeWeatherMode === 'rain' }"
+            :class="{ active: activeWeatherModes.includes('rain') }"
             title="Rain probability"
-            @click="setWeatherMode('rain')"
+            @click="toggleWeatherMode('rain')"
           >
             💧
           </div>
           <div 
             class="icon-circle" 
-            :class="{ active: activeWeatherMode === 'humidity' }"
+            :class="{ active: activeWeatherModes.includes('humidity') }"
             title="Humidity"
-            @click="setWeatherMode('humidity')"
+            @click="toggleWeatherMode('humidity')"
           >
             🌫️
           </div>
@@ -122,17 +122,20 @@ interface SummaryData {
   alerts: number
 }
 
+// ... (imports) ...
+
+const emit = defineEmits<{
+  (e: 'switch-layer', layerName: string): void
+  (e: 'weather-mode', modes: string[]): void
+}>()
+
 const props = defineProps<{
   location: LocationData | null
   summary?: SummaryData
 }>()
 
-const emit = defineEmits<{
-  (e: 'switch-layer', layerName: string): void
-  (e: 'weather-mode', mode: string): void
-}>()
-
 // Default summary if not provided
+// ... (computed summary) ...
 const summary = computed(() => props.summary || {
   avgTemp: 24.5,
   avgHumidity: 78,
@@ -157,12 +160,19 @@ const formattedCurrentTime = computed(() => {
 })
 
 // Weather Mode Logic
-const activeWeatherMode = ref('clear') // Default
+// Default: Clear sky enabled
+const activeWeatherModes = ref<string[]>(['clear']) 
 
-const setWeatherMode = (mode: string) => {
-  activeWeatherMode.value = mode
-  emit('weather-mode', mode)
+const toggleWeatherMode = (mode: string) => {
+  if (activeWeatherModes.value.includes(mode)) {
+    activeWeatherModes.value = activeWeatherModes.value.filter(m => m !== mode)
+  } else {
+    activeWeatherModes.value.push(mode)
+  }
+  emit('weather-mode', activeWeatherModes.value)
 }
+
+// ... (existing code) ...
 
 // Layer Logic
 const showLayers = ref(false)
