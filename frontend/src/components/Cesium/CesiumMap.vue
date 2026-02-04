@@ -127,21 +127,26 @@ const renderDataBars = async () => {
             const center = boundingSphere.center;
 
             // Height calculation
-            const barHeight = value * cfg.scale;
-            console.log(`[BarDebug] Adding bar for ${rawName}: Val=${value.toFixed(1)}, H=${barHeight.toFixed(0)}`);
+            // ⚓ Anchor Trick: Double the height and Clamp to Ground. 
+            // This centers the box on the terrain surface.
+            // Result: Bottom half is buried, Top half is visible.
+            // Visible Height = (Value * Scale * 2) / 2 = Value * Scale.
+            const barHeight = value * cfg.scale * 2;
+            
+            console.log(`[BarDebug] Adding anchored bar for ${rawName}: VisH=${(barHeight/2).toFixed(0)}`);
             
             // Create Bar Entity
             barDataSource.entities.add({
                 position: Cartesian3.fromRadians(
                     Cartographic.fromCartesian(center).longitude,
                     Cartographic.fromCartesian(center).latitude,
-                    (barHeight / 2) - 50 // ⚓ Sink 50m to anchor in terrain and prevent floating
+                    0 // Height ignored by CLAMP_TO_GROUND
                 ),
                 box: {
                     dimensions: new Cartesian3(2000, 2000, barHeight), 
                     material: cfg.color,
                     outline: false,
-                    heightReference: HeightReference.RELATIVE_TO_GROUND 
+                    heightReference: HeightReference.CLAMP_TO_GROUND // 🔒 Center on terrain
                 }
             });
             barsAdded++;
