@@ -17,6 +17,9 @@ import {
   PolylineGraphics,
   ColorMaterialProperty,
   ConstantProperty,
+  Cartographic,
+  Math as CesiumMath,
+  PolygonHierarchy,
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -33,6 +36,15 @@ onMounted(async () => {
     })
 
     if (viewer.scene) {
+      // 🌑 Stadia Alidade Smooth Dark
+      if (viewer.baseLayerPicker) {
+         const imageryViewModels = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
+         const stadiaDark = imageryViewModels.find((vm: any) => vm.name === 'Stadia Alidade Smooth Dark')
+         if (stadiaDark) {
+           viewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
+         }
+      }
+
       // ⏳ Time-of-day simulation
       const now = JulianDate.fromDate(new Date())
       const start = JulianDate.addHours(now, -12, new JulianDate())
@@ -67,14 +79,35 @@ onMounted(async () => {
         viewer.scene.sun.show = true
       }
 
-      // 🗺️ Load Antioquia GeoJSON
-      try {
-        const dataSource = await GeoJsonDataSource.load('/antioquia.geojson', {
-          fill: Color.TRANSPARENT,
-          clampToGround: true, // ⛰️ Clamp fill to terrain
-        })
+        // 🔧 Calibration Offsets (Adjust these to align map)
+        const LON_OFFSET = 0.03; // Positive = Shift Right (East)
+        const LAT_OFFSET = -0.008; // Positive = Shift Up (North)
 
-        await viewer.dataSources.add(dataSource)
+        const shiftPolygon = (entity: any) => {
+            if (entity.polygon) {
+                const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
+                if (hierarchy) {
+                    const newPositions = hierarchy.positions.map((p: Cartesian3) => {
+                        const carto = Cartographic.fromCartesian(p);
+                        carto.longitude += CesiumMath.toRadians(LON_OFFSET);
+                        carto.latitude += CesiumMath.toRadians(LAT_OFFSET);
+                        return Cartesian3.fromRadians(carto.longitude, carto.latitude, carto.height);
+                    });
+                    entity.polygon.hierarchy = new ConstantProperty(new PolygonHierarchy(newPositions));
+                }
+            }
+        };
+
+        // 🗺️ Load Antioquia GeoJSON
+        try {
+            const dataSource = await GeoJsonDataSource.load('/antioquia.geojson', {
+                fill: Color.TRANSPARENT,
+                clampToGround: true, // ⛰️ Clamp fill to terrain
+            })
+
+            await viewer.dataSources.add(dataSource)
+
+
 
         // List of municipalities to highlight
         const rawTargetTowns = [
@@ -127,6 +160,8 @@ onMounted(async () => {
 
             // 🎨 Style Fill (Clamped)
             if (entity.polygon) {
+              shiftPolygon(entity); // Apply shift before creating specific styles
+
               entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.1))
               entity.polygon.outline = new ConstantProperty(false) // Outlines don't work well on clamped polygons
 
@@ -171,6 +206,8 @@ onMounted(async () => {
           if (!entity) continue;
           
           if (entity.polygon) {
+            shiftPolygon(entity); // Apply shift
+
             const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
             
             // ✏️ Create Clamped Outline using Polyline
