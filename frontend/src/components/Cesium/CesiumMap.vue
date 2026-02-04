@@ -44,6 +44,7 @@ const currentWeatherData = ref<{ temp: number; rain: number; humidity: number } 
 const currentLocalPolygon = ref<{ x: number, y: number }[]>([]); 
 // Store local bounding box
 const currentLocalBounds = ref<{ minX: number, maxX: number, minY: number, maxY: number }>({ minX: 0, maxX: 0, minY: 0, maxY: 0 });
+const currentPolygonCenter = ref<Cartesian3 | null>(null);
 
 // Viewer instance accessible 
 let cesiumViewer: Viewer | null = null
@@ -81,8 +82,6 @@ const handleLayerSwitch = (layerName: string) => {
         cesiumViewer.baseLayerPicker.viewModel.selectedImagery = target
     }
 }
-
-
 
 const interpolateColor = (color1: string, color2: string, factor: number) => {
     // Simple RGB interpolation
@@ -158,7 +157,8 @@ class PolygonEmitter {
                 // Found a valid spot!
                 particle.position.x = x;
                 particle.position.y = y;
-                particle.position.z = 0; // Relative to emitter center
+                // Spawn randomly in the vertical column (0 to -4000 relative to cloud)
+                particle.position.z = CesiumMath.randomBetween(-4000.0, 0.0); 
                 
                 particle.velocity.x = 0;
                 particle.velocity.y = 0;
@@ -215,22 +215,33 @@ const refreshRainEffect = () => {
     }
 
     // Rain Logic
-    const position = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + 2500); // Higher start
+    // Use the Polygon Center if available (for precise alignment), otherwise fallback to location (click point)
+    let position: Cartesian3;
+    if (currentPolygonCenter.value) {
+        // We need to add height to the center.
+        // Convert to Cartographic to add altitude safely
+        const carto = Cartographic.fromCartesian(currentPolygonCenter.value);
+        position = Cartesian3.fromRadians(carto.longitude, carto.latitude, location.alt + 4000); 
+    } else {
+        position = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + 4000); 
+    }
+
     const modelMatrix = Transforms.eastNorthUpToFixedFrame(position);
     
     // Scale intensity
-    const emissionRate = Math.min(Math.max(data.rain * 5, 10), 300); 
+    const emissionRate = Math.min(Math.max(data.rain * 2, 5), 100); 
     const speed = 10.0;
     const radius = currentRainRadius.value;
 
     rainSystem = new ParticleSystem({
+        // ... (rest of config same as before) ...
         image: createRainCanvas(),
         startColor: Color.WHITE.withAlpha(0.6),
         endColor: Color.WHITE.withAlpha(0.0),
         startScale: 1.0,
         endScale: 1.0,
-        minimumParticleLife: 3.0, 
-        maximumParticleLife: 3.0,
+        minimumParticleLife: 60.0, 
+        maximumParticleLife: 60.0,
         minimumSpeed: speed * 0.8,
         maximumSpeed: speed * 1.2,
         imageSize: new Cartesian2(6, 20),
@@ -238,7 +249,7 @@ const refreshRainEffect = () => {
         // Use our custom PolygonEmitter if available, else fallback
         emitter: (currentLocalPolygon.value.length > 0) 
             ? new PolygonEmitter(currentLocalPolygon.value, currentLocalBounds.value)
-            : new BoxEmitter(new Cartesian3(radius * 1.4, radius * 1.4, 2500.0)),
+            : new BoxEmitter(new Cartesian3(radius * 1.4, radius * 1.4, 4000.0)),
         lifetime: 16.0,
         modelMatrix: modelMatrix,
         updateCallback: (particle: any, dt: number) => {
@@ -250,8 +261,6 @@ const refreshRainEffect = () => {
     
     cesiumViewer.scene.primitives.add(rainSystem);
 }
-
-
 
 const createTempBarGradient = (temp: number, maxTemp: number = 50) => {
     const canvas = document.createElement('canvas');
@@ -438,6 +447,8 @@ watch(selectedLocation, (newLoc) => {
                  if (hierarchy) {
                      const bs = BoundingSphere.fromPoints(hierarchy.positions);
                      currentRainRadius.value = bs.radius * 0.9; 
+                     currentPolygonCenter.value = bs.center; // 📍 Store Center!
+                     
                      console.log(`[Rain] Auto-radius for ${newLoc.name}: ${currentRainRadius.value.toFixed(0)}m`);
                      
                      // 📐 Compute Local Polygon for Shape Emitter
@@ -448,10 +459,12 @@ watch(selectedLocation, (newLoc) => {
              } else {
                 currentRainRadius.value = 1500.0;
                 currentLocalPolygon.value = [];
+                currentPolygonCenter.value = null;
              }
         }
     } else {
         currentWeatherData.value = null;
+        currentPolygonCenter.value = null;
     }
     refreshRainEffect();
     renderDataBars();
