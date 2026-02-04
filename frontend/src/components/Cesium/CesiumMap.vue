@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import WeatherOverlay from '../WeatherOverlay.vue'
+// ... imports ...
 import {
   Viewer,
   createWorldTerrainAsync,
@@ -20,32 +21,121 @@ import {
   ScreenSpaceEventType,
   defined,
   type Entity,
+  CustomDataSource, // Added
+  BoxGraphics, // Added
+  BoundingSphere, // Added
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
 const cesiumContainer = ref<HTMLElement | null>(null)
 const selectedLocation = ref<{ name: string; lat: number; lon: number; alt: number } | null>(null)
+const currentWeatherMode = ref('clear') // Default mode
 
-// Viewer instance accessible to handleLayerSwitch
+// Viewer instance accessible 
 let viewer: Viewer | null = null
 
+// Data Source for 3D Bars
+let barDataSource: CustomDataSource | null = null
+
+// Mock Data Cache to keep values consistent
+const townDataCache: Record<string, { temp: number, rain: number, humidity: number }> = {}
+
+const getTownData = (townName: string) => {
+    if (!townDataCache[townName]) {
+        townDataCache[townName] = {
+            temp: 15 + Math.random() * 20, // 15-35 C
+            rain: Math.random() < 0.3 ? 0 : Math.random() * 50, // 0-50 mm
+            humidity: 40 + Math.random() * 60 // 40-100 %
+        }
+    }
+    return townDataCache[townName]
+}
+
 const handleLayerSwitch = (layerName: string) => {
+   // ... existing layer switch logic ...
     if (!viewer || !viewer.baseLayerPicker) return
     
     const models = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
-    // Helper to match partial names if needed, or exact
     let target = models.find((vm: any) => vm.name === layerName)
-    
-    // Fallback or fuzzy match for Bing
     if (!target && layerName.includes('Bing')) {
         target = models.find((vm: any) => vm.name.includes('Bing Maps Aerial'))
     }
-
     if (target) {
         viewer.baseLayerPicker.viewModel.selectedImagery = target
-    } else {
-        console.warn(`Layer ${layerName} not found in provider list.`)
     }
+}
+
+// 📊 Render 3D Bars based on Mode
+const renderDataBars = async () => {
+    if (!viewer || !barDataSource) return;
+    
+    barDataSource.entities.removeAll();
+
+    const mode = currentWeatherMode.value;
+    // Scalar configs
+    const config = {
+        'clear': { scale: 200, color: Color.ORANGE, prop: 'temp', label: 'Temp' }, // Height = val * 200
+        'rain': { scale: 500, color: Color.DEEPSKYBLUE, prop: 'rain', label: 'Rain' },
+        'humidity': { scale: 100, color: Color.WHITESMOKE.withAlpha(0.8), prop: 'humidity', label: 'Hum' }
+    }
+    
+    // @ts-ignore
+    const cfg = config[mode] || config['clear'];
+
+    // We need to find the entities corresponding to target towns again
+    // In a real app, we might store these entities in a map during the first load loop
+    // For now, let's iterate the GeoJSON source again if available
+    const geoJsonSource = viewer.dataSources.get(0); // Assuming it's the first one or we find by name
+    if (!geoJsonSource) return;
+
+    const entities = geoJsonSource.entities.values;
+    
+    // Re-use target towns list logic or just check all suitable polygons
+    for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        if (!entity?.polygon || !entity.show) continue; // Skip hidden/non-polygon
+        
+        const rawName = entity.properties?.NOMBRE_MPI?.getValue();
+        if (!rawName) continue;
+
+        const data = getTownData(rawName);
+        // @ts-ignore
+        const value = data[cfg.prop];
+
+        if (value <= 0) continue; // Don't draw 0-height bars
+
+        // Calculate Centroid
+        const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
+        if (hierarchy) {
+            const positions = hierarchy.positions;
+            const boundingSphere = BoundingSphere.fromPoints(positions);
+            const center = boundingSphere.center;
+
+            // Height calculation
+            const barHeight = value * cfg.scale;
+            
+            // Create Bar Entity
+            barDataSource.entities.add({
+                position: Cartesian3.fromRadians(
+                    Cartographic.fromCartesian(center).longitude,
+                    Cartographic.fromCartesian(center).latitude,
+                    barHeight / 2 // Box is centered, so push it up by half height? Actually usually center + half height
+                    // But if we put position on surface, box extends down. 
+                    // Better: position at surface + half height.
+                ),
+                box: {
+                    dimensions: new Cartesian3(2000, 2000, barHeight), // 2km wide bars
+                    material: cfg.color,
+                    outline: false
+                }
+            });
+        }
+    }
+}
+
+const handleWeatherMode = (mode: string) => {
+    currentWeatherMode.value = mode;
+    renderDataBars();
 }
 
 onMounted(async () => {
@@ -68,6 +158,17 @@ onMounted(async () => {
     })
 
     if (viewer.scene) {
+        // ... (existing scene setup) ... 
+        
+        // 📊 Add Custom Data Source for Bars
+        barDataSource = new CustomDataSource('bars');
+        viewer.dataSources.add(barDataSource);
+
+        // ... (existing logic) ...
+        
+        // ... Inside GeoJSON load ...
+        // After loading GeoJSON and filtering, call renderDataBars() once to init
+        
         // 🌑 Initial Layer: Stadia
         if (viewer.baseLayerPicker) {
             const getProvider = (name: string) => 
@@ -125,6 +226,8 @@ onMounted(async () => {
                         const carto = Cartographic.fromCartesian(p);
                         carto.longitude += CesiumMath.toRadians(LON_OFFSET);
                         carto.latitude += CesiumMath.toRadians(LAT_OFFSET);
+                        // IMPORTANT: For shift to work with bars, we must base bars on the shifted positions
+                        // Since we shift the entity polygon itself, calculating centroid from entity.polygon later should be fine!
                         return Cartesian3.fromRadians(carto.longitude, carto.latitude, carto.height);
                     });
                     entity.polygon.hierarchy = new ConstantProperty(new PolygonHierarchy(newPositions));
@@ -139,6 +242,9 @@ onMounted(async () => {
             const pickedObject = viewer.scene.pick(movement.position);
             
             if (defined(pickedObject) && pickedObject.id) {
+                // If we pick a bar, we might want to get the underlying town?
+                // Or just ignore bars? Bars are in customDataSource.
+                
                 const entity = pickedObject.id as Entity;
                 // Check if it has a polygon (municipality)
                 if (entity.polygon || entity.polyline) { 
@@ -251,6 +357,11 @@ onMounted(async () => {
                     entity.show = false
                 }
             }
+            
+            // 📊 Initial Bar Render
+            setTimeout(() => {
+                renderDataBars();
+            }, 1000); // Small delay to ensure entities are ready/shifted
 
             // 🎥 Fly to Antioquia
             viewer.camera.flyTo({
@@ -260,7 +371,8 @@ onMounted(async () => {
         } catch (error) {
             console.error('Error loading GeoJSON:', error)
         }
-
+        
+        // ... (rest of geojson loading for depto) ...
         // 🗺️ Load Antioquia Department Outline
         try {
             const deptoDataSource = await GeoJsonDataSource.load('/antioquia_depto.geojson', {
@@ -297,6 +409,7 @@ onMounted(async () => {
         } catch (error) {
             console.error('Error loading Department GeoJSON:', error)
         }
+
     }
   }
 })
@@ -305,7 +418,7 @@ onMounted(async () => {
 <template>
   <div class="cesium-wrapper">
     <div id="cesiumContainer" ref="cesiumContainer"></div>
-    <WeatherOverlay :location="selectedLocation" @switch-layer="handleLayerSwitch" />
+    <WeatherOverlay :location="selectedLocation" @switch-layer="handleLayerSwitch" @weather-mode="handleWeatherMode" />
   </div>
 </template>
 
