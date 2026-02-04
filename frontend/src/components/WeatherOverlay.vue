@@ -30,8 +30,14 @@
           >
             🌫️
           </div>
-        </div>
+          </div>
+
         
+        <!-- Reset Camera -->
+        <div class="icon-circle layer-btn" @click="emit('reset-camera')" title="Reset View">
+          🔄
+        </div>
+
         <!-- Layer Picker -->
         <div class="layer-control">
           <div class="icon-circle layer-btn" @click="showLayers = !showLayers" title="Map Layers">
@@ -54,6 +60,28 @@
               🛰️ Bing Satellite
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Weather Stats Panel -->
+      <div class="glass-card stats-panel">
+        <div class="stat-item" :class="{ inactive: !activeWeatherModes.includes('clear') }">
+          <span class="stat-label">TEMP</span>
+          <span class="stat-value">
+            {{ activeWeatherModes.includes('clear') && weatherData ? weatherData.temp.toFixed(1) + '°C' : '--' }}
+          </span>
+        </div>
+        <div class="stat-item" :class="{ inactive: !activeWeatherModes.includes('rain') }">
+          <span class="stat-label">RAIN</span>
+          <span class="stat-value">
+            {{ activeWeatherModes.includes('rain') && weatherData ? weatherData.rain.toFixed(1) + 'mm' : '--' }}
+          </span>
+        </div>
+        <div class="stat-item" :class="{ inactive: !activeWeatherModes.includes('humidity') }">
+          <span class="stat-label">HUM</span>
+          <span class="stat-value">
+            {{ activeWeatherModes.includes('humidity') && weatherData ? weatherData.humidity.toFixed(0) + '%' : '--' }}
+          </span>
         </div>
       </div>
 
@@ -122,16 +150,24 @@ interface SummaryData {
   alerts: number
 }
 
+interface WeatherData {
+  temp: number
+  rain: number
+  humidity: number
+}
+
 // ... (imports) ...
 
 const emit = defineEmits<{
   (e: 'switch-layer', layerName: string): void
   (e: 'weather-mode', modes: string[]): void
+  (e: 'reset-camera'): void
 }>()
 
 const props = defineProps<{
   location: LocationData | null
   summary?: SummaryData
+  weatherData?: WeatherData | null
 }>()
 
 // Default summary if not provided
@@ -393,5 +429,37 @@ h3 {
   background: rgba(165, 243, 252, 0.2);
   color: #a5f3fc;
   border: 1px solid rgba(165, 243, 252, 0.3);
+}
+
+/* Stats Panel */
+.stats-panel {
+  display: flex;
+  justify-content: space-between;
+  padding: 1rem;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.6);
+  letter-spacing: 1px;
+}
+
+.stat-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #fff;
+  min-width: 3rem;
+  text-align: center;
+}
+
+.stat-item.inactive .stat-value {
+  color: rgba(255, 255, 255, 0.3);
 }
 </style>

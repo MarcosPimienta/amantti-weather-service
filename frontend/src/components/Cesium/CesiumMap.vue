@@ -30,9 +30,10 @@ import 'cesium/Build/Cesium/Widgets/widgets.css'
 const cesiumContainer = ref<HTMLElement | null>(null)
 const selectedLocation = ref<{ name: string; lat: number; lon: number; alt: number } | null>(null)
 const currentWeatherMode = ref<string[]>(['clear']) // Default mode
+const currentWeatherData = ref<{ temp: number; rain: number; humidity: number } | null>(null)
 
 // Viewer instance accessible 
-let viewer: Viewer | null = null
+let cesiumViewer: Viewer | null = null
 
 // Data Source for 3D Bars
 let barDataSource: CustomDataSource | null = null
@@ -53,20 +54,20 @@ const getTownData = (townName: string) => {
 }
 
 const handleLayerSwitch = (layerName: string) => {
-    if (!viewer || !viewer.baseLayerPicker) return
+    if (!cesiumViewer || !cesiumViewer.baseLayerPicker) return
     
-    const models = viewer.baseLayerPicker.viewModel.imageryProviderViewModels
+    const models = cesiumViewer.baseLayerPicker.viewModel.imageryProviderViewModels
     let target = models.find((vm: any) => vm.name === layerName)
     if (!target && layerName.includes('Bing')) {
         target = models.find((vm: any) => vm.name.includes('Bing Maps Aerial'))
     }
     if (target) {
-        viewer.baseLayerPicker.viewModel.selectedImagery = target
+        cesiumViewer.baseLayerPicker.viewModel.selectedImagery = target
     }
 }
 
 const renderDataBars = async () => {
-    if (!viewer || !barDataSource) return;
+    if (!cesiumViewer || !barDataSource) return;
     
     // Debug log
     console.log(`[BarDebug] Render called. Modes: ${currentWeatherMode.value.join(', ')}`);
@@ -124,7 +125,7 @@ const renderDataBars = async () => {
              if (value <= 0) continue; 
 
              // Calculate Centroid
-             const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
+             const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
              if (hierarchy) {
                  const positions = hierarchy.positions;
                  const boundingSphere = BoundingSphere.fromPoints(positions);
@@ -171,16 +172,32 @@ const handleWeatherMode = (modes: string[]) => {
 }
 
 // 👀 Watch for Selection Changes to update bars
-watch(selectedLocation, () => {
+watch(selectedLocation, (newLoc) => {
+    if (newLoc) {
+        currentWeatherData.value = getTownData(newLoc.name)
+    } else {
+        currentWeatherData.value = null
+    }
+    renderDataBars();
     renderDataBars();
 })
+
+const resetCamera = () => {
+    if (cesiumViewer) {
+        cesiumViewer.camera.flyTo({
+            destination: Cartesian3.fromDegrees(-75.5, 6.5, 500000), // Approximate center of Antioquia
+            duration: 2,
+        })
+        selectedLocation.value = null // Optional: Deselect town on reset?
+    }
+}
 
 onMounted(async () => {
   if (cesiumContainer.value) {
     Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 
     // Assign to top-level variable
-    viewer = new Viewer(cesiumContainer.value, {
+    cesiumViewer = new Viewer(cesiumContainer.value, {
       terrainProvider: await createWorldTerrainAsync({}),
       timeline: false,
       animation: false, // ❌ Disable Animation Dial
@@ -194,12 +211,12 @@ onMounted(async () => {
       baseLayerPicker: true, // ✅ Keep enabled for logic, hide via CSS
     })
 
-    if (viewer.scene) {
+    if (cesiumViewer.scene) {
         // ... (existing scene setup) ... 
         
         // 📊 Add Custom Data Source for Bars
         barDataSource = new CustomDataSource('bars');
-        viewer.dataSources.add(barDataSource);
+        cesiumViewer.dataSources.add(barDataSource);
 
         // ... (existing logic) ...
         
@@ -207,13 +224,13 @@ onMounted(async () => {
         // After loading GeoJSON and filtering, call renderDataBars() once to init
         
         // 🌑 Initial Layer: Stadia
-        if (viewer.baseLayerPicker) {
+        if (cesiumViewer.baseLayerPicker) {
             const getProvider = (name: string) => 
-               viewer?.baseLayerPicker.viewModel.imageryProviderViewModels.find((vm: any) => vm.name === name)
+               cesiumViewer?.baseLayerPicker.viewModel.imageryProviderViewModels.find((vm: any) => vm.name === name)
 
             const stadiaDark = getProvider('Stadia Alidade Smooth Dark')
             if (stadiaDark) {
-               viewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
+               cesiumViewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
             }
         }
 
@@ -222,33 +239,33 @@ onMounted(async () => {
       const start = JulianDate.addHours(now, -12, new JulianDate())
       const stop = JulianDate.addHours(now, 12, new JulianDate())
 
-      viewer.clock.startTime = start.clone()
-      viewer.clock.stopTime = stop.clone()
-      viewer.clock.currentTime = now.clone()
-      viewer.clock.clockRange = 2 // LOOP_STOP
-      viewer.clock.multiplier = 3600 // 1 hour per second
-      viewer.clock.shouldAnimate = true
+      cesiumViewer.clock.startTime = start.clone()
+      cesiumViewer.clock.stopTime = stop.clone()
+      cesiumViewer.clock.currentTime = now.clone()
+      cesiumViewer.clock.clockRange = 2 // LOOP_STOP
+      cesiumViewer.clock.multiplier = 3600 // 1 hour per second
+      cesiumViewer.clock.shouldAnimate = true
 
       // 🌎 Terrain & Lighting
-      viewer.shadows = true
-      viewer.scene.globe.enableLighting = true
-      viewer.scene.globe.depthTestAgainstTerrain = true
-      viewer.scene.globe.showGroundAtmosphere = true
-      viewer.scene.globe.showWaterEffect = true
-      viewer.scene.globe.baseColor = Color.BLACK
+      cesiumViewer.shadows = true
+      cesiumViewer.scene.globe.enableLighting = true
+      cesiumViewer.scene.globe.depthTestAgainstTerrain = true
+      cesiumViewer.scene.globe.showGroundAtmosphere = true
+      cesiumViewer.scene.globe.showWaterEffect = true
+      cesiumViewer.scene.globe.baseColor = Color.BLACK
 
       // 🌫️ Fog
-      viewer.scene.fog.enabled = true
-      viewer.scene.fog.density = 0.0012
-      viewer.scene.fog.minimumBrightness = 0.003
+      cesiumViewer.scene.fog.enabled = true
+      cesiumViewer.scene.fog.density = 0.0012
+      cesiumViewer.scene.fog.minimumBrightness = 0.003
 
       // ☁️ Sky & Sunlight
-      viewer.scene.skyAtmosphere = new SkyAtmosphere()
-      viewer.scene.skyAtmosphere.hueShift = -0.8
-      viewer.scene.skyAtmosphere.saturationShift = -0.7
-      viewer.scene.skyAtmosphere.brightnessShift = -0.33
-      if (viewer.scene.sun) {
-        viewer.scene.sun.show = true
+      cesiumViewer.scene.skyAtmosphere = new SkyAtmosphere()
+      cesiumViewer.scene.skyAtmosphere.hueShift = -0.8
+      cesiumViewer.scene.skyAtmosphere.saturationShift = -0.7
+      cesiumViewer.scene.skyAtmosphere.brightnessShift = -0.33
+      if (cesiumViewer.scene.sun) {
+        cesiumViewer.scene.sun.show = true
       }
 
        // 🔧 Calibration Offsets (Adjust these to align map)
@@ -256,8 +273,8 @@ onMounted(async () => {
         const LAT_OFFSET = -0.008; // Positive = Shift Up (North)
 
         const shiftPolygon = (entity: any) => {
-            if (entity.polygon && viewer) { // Check viewer exists
-                const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime);
+            if (entity.polygon && cesiumViewer) { // Check viewer exists
+                const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
                 if (hierarchy) {
                     const newPositions = hierarchy.positions.map((p: Cartesian3) => {
                         const carto = Cartographic.fromCartesian(p);
@@ -273,10 +290,10 @@ onMounted(async () => {
         };
 
         // 👆 Click Handler for Selection
-        const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
+        const handler = new ScreenSpaceEventHandler(cesiumViewer.scene.canvas);
         handler.setInputAction((movement: any) => {
-            if (!viewer) return;
-            const pickedObject = viewer.scene.pick(movement.position);
+            if (!cesiumViewer) return;
+            const pickedObject = cesiumViewer.scene.pick(movement.position);
             
             if (defined(pickedObject) && pickedObject.id) {
                 // If we pick a bar, we might want to get the underlying town?
@@ -289,7 +306,7 @@ onMounted(async () => {
                     const name = entity.properties?.NOMBRE_MPI?.getValue() || 'Unknown Town';
                     
                     // Retrieve approximate location from picking position on globe
-                    const cartesian = viewer.camera.pickEllipsoid(movement.position, viewer.scene.globe.ellipsoid);
+                    const cartesian = cesiumViewer.camera.pickEllipsoid(movement.position, cesiumViewer.scene.globe.ellipsoid);
                     if (cartesian) {
                         const cartographic = Cartographic.fromCartesian(cartesian);
                         const lat = CesiumMath.toDegrees(cartographic.latitude);
@@ -320,7 +337,7 @@ onMounted(async () => {
                 clampToGround: true, // ⛰️ Clamp fill to terrain
             })
 
-            await viewer.dataSources.add(dataSource)
+            await cesiumViewer.dataSources.add(dataSource)
             municipalitiesDataSource = dataSource // 📍 Store reference
 
             // List of municipalities to highlight
@@ -380,7 +397,7 @@ onMounted(async () => {
                     entity.polygon.outline = new ConstantProperty(false) // Outlines don't work well on clamped polygons
 
                     // ✏️ Create Clamped Outline using Polyline
-                    const hierarchy = entity.polygon.hierarchy?.getValue(viewer?.clock.currentTime) // Safe check
+                    const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer?.clock.currentTime) // Safe check
                     if (hierarchy) {
                         entity.polyline = new PolylineGraphics({
                         positions: hierarchy.positions,
@@ -402,7 +419,7 @@ onMounted(async () => {
             }, 1000); // Small delay to ensure entities are ready/shifted
 
             // 🎥 Fly to Antioquia
-            viewer.camera.flyTo({
+            cesiumViewer.camera.flyTo({
             destination: Cartesian3.fromDegrees(-75.5, 6.5, 500000), // Approximate center of Antioquia
             duration: 3,
             })
@@ -418,7 +435,7 @@ onMounted(async () => {
             clampToGround: true,
             })
 
-            await viewer.dataSources.add(deptoDataSource)
+            await cesiumViewer.dataSources.add(deptoDataSource)
 
             const deptoEntities = deptoDataSource.entities.values
             for (let i = 0; i < deptoEntities.length; i++) {
@@ -428,7 +445,7 @@ onMounted(async () => {
             if (entity.polygon) {
                 shiftPolygon(entity); // Apply shift
 
-                const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
+                const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime)
                 
                 // ✏️ Create Clamped Outline using Polyline
                 if (hierarchy) {
@@ -456,7 +473,13 @@ onMounted(async () => {
 <template>
   <div class="cesium-wrapper">
     <div id="cesiumContainer" ref="cesiumContainer"></div>
-    <WeatherOverlay :location="selectedLocation" @switch-layer="handleLayerSwitch" @weather-mode="handleWeatherMode" />
+    <WeatherOverlay 
+        :location="selectedLocation" 
+        :weather-data="currentWeatherData"
+        @switch-layer="handleLayerSwitch" 
+        @weather-mode="handleWeatherMode" 
+        @reset-camera="resetCamera"
+    />
   </div>
 </template>
 
