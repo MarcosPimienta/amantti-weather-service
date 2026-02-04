@@ -149,19 +149,22 @@ onMounted(async () => {
         for (let i = 0; i < deptoEntities.length; i++) {
           const entity = deptoEntities[i]
           if (!entity) continue;
+          
           if (entity.polygon) {
-            entity.polygon.material = new ColorMaterialProperty(Color.TRANSPARENT)
-            entity.polygon.outline = new ConstantProperty(false)
-
             const hierarchy = entity.polygon.hierarchy?.getValue(viewer.clock.currentTime)
+            
+            // ✏️ Create Clamped Outline using Polyline
             if (hierarchy) {
               entity.polyline = new PolylineGraphics({
                 positions: hierarchy.positions,
                 width: 5,
-                material: Color.YELLOW,
+                material: Color.fromCssColorString('#00BD06'),
                 clampToGround: true,
               })
             }
+            
+            // ❌ Remove polygon fill to prevent blocking clicks on municipalities
+            entity.polygon = undefined
           }
         }
       } catch (error) {
