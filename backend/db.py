@@ -1,12 +1,21 @@
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from app.models import WeatherLog, Base
 from datetime import datetime
 from typing import List
 
-DATABASE_URL = "sqlite:///./weather.db"
+# Support DATABASE_URL environment variable for production
+# Falls back to SQLite for local development
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./weather.db")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# Handle SQLite-specific configuration
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    # For PostgreSQL and other databases
+    engine = create_engine(DATABASE_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Called once to create tables
