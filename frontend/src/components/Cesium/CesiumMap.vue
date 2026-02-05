@@ -41,6 +41,9 @@ const selectedLocation = ref<{ name: string; lat: number; lon: number; alt: numb
 const currentWeatherMode = ref<string[]>(['clear']) // Default mode
 const currentWeatherData = ref<{ temp: number; rain: number; humidity: number } | null>(null)
 // Store local polygon positions for the emitter
+const currentLocalPolygon = ref<{ x: number, y: number }[]>([]); 
+// Store local bounding box
+const currentLocalBounds = ref<{ minX: number, maxX: number, minY: number, maxY: number }>({ minX: 0, maxX: 0, minY: 0, maxY: 0 });
 const currentPolygonCenter = ref<Cartesian3 | null>(null);
 
 // Viewer instance accessible 
@@ -89,6 +92,91 @@ const interpolateColor = (color1: string, color2: string, factor: number) => {
     return result.toCssColorString();
 }
 
+// 📐 Geometry Helpers
+const pointInPolygon = (point: { x: number, y: number }, vs: { x: number, y: number }[]) => {
+    // Ray-casting algorithm based on the Jordan Curve Theorem
+    let x = point.x, y = point.y;
+    let inside = false;
+    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+        const p1 = vs[i];
+        const p2 = vs[j];
+
+        if (!p1 || !p2) continue;
+
+        let xi = p1.x, yi = p1.y;
+        let xj = p2.x, yj = p2.y;
+        
+        let intersect = ((yi > y) !== (yj > y))
+            && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+};
+
+const computeLocalPolygon = (positions: Cartesian3[], center: Cartesian3) => {
+    // 1. Compute Local Frame (ENU) at Center
+    const toFixed = Transforms.eastNorthUpToFixedFrame(center);
+    const toLocal = Matrix4.inverse(toFixed, new Matrix4());
+    
+    // 2. Transform all points to Local Frame
+    const localPoints: { x: number, y: number }[] = [];
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+
+    for (const pos of positions) {
+        const localPos = Matrix4.multiplyByPoint(toLocal, pos, new Cartesian3());
+        // Z should be approx 0 if points are on surface and center is on surface.
+        // We only care about XY for the particle emitter check.
+        localPoints.push({ x: localPos.x, y: localPos.y });
+        
+        if (localPos.x < minX) minX = localPos.x;
+        if (localPos.x > maxX) maxX = localPos.x;
+        if (localPos.y < minY) minY = localPos.y;
+        if (localPos.y > maxY) maxY = localPos.y;
+    }
+    
+    return { polygon: localPoints, bounds: { minX, maxX, minY, maxY } };
+}
+
+// Custom Emitter Class
+class PolygonEmitter {
+    private _polygon: { x: number, y: number }[];
+    private _bounds: { minX: number, maxX: number, minY: number, maxY: number };
+    private _minZ: number;
+    private _maxZ: number;
+
+    constructor(polygon: { x: number, y: number }[], bounds: any, minZ: number = -4000.0, maxZ: number = 0.0) {
+        this._polygon = polygon;
+        this._bounds = bounds;
+        this._minZ = minZ;
+        this._maxZ = maxZ;
+    }
+
+    emit(particle: any, dt: number) {
+        // Rejection Sampling
+        // Try up to 10 times to find a point inside the polygon
+        for (let i = 0; i < 10; i++) {
+            const x = CesiumMath.randomBetween(this._bounds.minX, this._bounds.maxX);
+            const y = CesiumMath.randomBetween(this._bounds.minY, this._bounds.maxY);
+            
+            if (pointInPolygon({ x, y }, this._polygon)) {
+                // Found a valid spot!
+                particle.position.x = x;
+                particle.position.y = y;
+                // Spawn randomly in the vertical column 
+                particle.position.z = CesiumMath.randomBetween(this._minZ, this._maxZ); 
+                
+                particle.velocity.x = 0;
+                particle.velocity.y = 0;
+                particle.velocity.z = -10.0; // Initial speed
+                
+                return; // Success
+            }
+        }
+        // If we fail 10 times, kill the particle
+        particle.life = 0; 
+    }
+}
+
 const createRainCanvas = () => {
     const canvas = document.createElement('canvas');
     canvas.width = 32;
@@ -111,27 +199,21 @@ const createRainCanvas = () => {
 
 
 
-// 🌧️ Camera-Attached Rain System
-let rainUpdateListener: (() => void) | null = null;
 const currentRainRadius = ref(1500.0);
 
 const refreshRainEffect = () => {
     if (!cesiumViewer) return;
     
-    // Cleanup existing
+    // Always remove existing first to handle updates
     if (rainSystem) {
         cesiumViewer.scene.primitives.remove(rainSystem);
         rainSystem = null;
     }
-    if (rainUpdateListener) {
-        cesiumViewer.scene.preUpdate.removeEventListener(rainUpdateListener);
-        rainUpdateListener = null;
-    }
-
+    
     const location = selectedLocation.value;
     const data = currentWeatherData.value;
     
-    // Conditions to show rain:
+    // Conditions to show rain/clouds:
     // 1. Location selected
     // 2. Data available 
     if (!location || !data) {
@@ -140,36 +222,43 @@ const refreshRainEffect = () => {
 
     // Rain Logic
     if (data.rain > 0 && currentWeatherMode.value.includes('rain')) {
-         
-        // 💧 Intensity Scaling
-        // Rain is 0-50 mm
-        const intensityNode = Math.min(data.rain / 50, 1.0); 
-        const emissionRate = 200 * intensityNode * 15.0; 
-        
-        // Speed
-        const speed = 15.0 + (intensityNode * 10.0);
+         // Use the Polygon Center if available (for precise alignment), otherwise fallback to location (click point)
+        let position: Cartesian3;
+        if (currentPolygonCenter.value) {
+            // We need to add height to the center.
+            // Convert to Cartographic to add altitude safely
+            const carto = Cartographic.fromCartesian(currentPolygonCenter.value);
+            position = Cartesian3.fromRadians(carto.longitude, carto.latitude, location.alt + 4000); 
+        } else {
+            position = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + 4000); 
+        }
 
-        // 🎥 Camera-Attached Rain System
-        const rainImageSize = new Cartesian2(4, 15);
+        const modelMatrix = Transforms.eastNorthUpToFixedFrame(position);
         
+        // Scale intensity
+        const emissionRate = Math.min(Math.max(data.rain * 2, 5), 100); 
+        const speed = 10.0;
+        const radius = currentRainRadius.value;
+
         rainSystem = new ParticleSystem({
             image: createRainCanvas(),
             startColor: Color.WHITE.withAlpha(0.6),
             endColor: Color.WHITE.withAlpha(0.0),
             startScale: 1.0,
             endScale: 1.0,
-            minimumParticleLife: 1.5, 
-            maximumParticleLife: 1.5,
-            minimumSpeed: speed * 0.9,
-            maximumSpeed: speed * 1.1,
-            imageSize: rainImageSize,
+            minimumParticleLife: 60.0, 
+            maximumParticleLife: 60.0,
+            minimumSpeed: speed * 0.8,
+            maximumSpeed: speed * 1.2,
+            imageSize: new Cartesian2(6, 20),
             emissionRate: emissionRate,
-            // Box Emitter around camera
-            emitter: new BoxEmitter(new Cartesian3(1000.0, 1000.0, 800.0)),
+            // Use our custom PolygonEmitter if available, else fallback
+            emitter: (currentLocalPolygon.value.length > 0) 
+                ? new PolygonEmitter(currentLocalPolygon.value, currentLocalBounds.value)
+                : new BoxEmitter(new Cartesian3(radius * 1.4, radius * 1.4, 4000.0)),
             lifetime: 16.0,
-            modelMatrix: Matrix4.IDENTITY, 
+            modelMatrix: modelMatrix,
             updateCallback: (particle: any, dt: number) => {
-               // Gravity (Down relative to world)
                particle.velocity.z = -speed; 
                particle.velocity.x = 0;
                particle.velocity.y = 0;
@@ -177,20 +266,6 @@ const refreshRainEffect = () => {
         });
         
         cesiumViewer.scene.primitives.add(rainSystem);
-
-        // 👂 Update Loop: Keep Rain System centered on Camera
-        rainUpdateListener = () => {
-             if (!cesiumViewer || !rainSystem) return;
-             
-             const cameraPos = cesiumViewer.camera.position;
-             // Calculate matrix at camera position with ENU orientation
-             // This keeps "Up" aligned with World Up
-             const params = Transforms.eastNorthUpToFixedFrame(cameraPos);
-             
-             rainSystem.modelMatrix = params;
-        };
-        
-        cesiumViewer.scene.preUpdate.addEventListener(rainUpdateListener);
     }
 }
 
@@ -358,13 +433,45 @@ const handleWeatherMode = (modes: string[]) => {
 }
 
 // 👀 Watch for Selection Changes to update bars
-// � Watch for Selection Changes to update bars
 watch(selectedLocation, (newLoc) => {
     if (newLoc) {
         const data = getTownData(newLoc.name);
         currentWeatherData.value = data;
+
+        // 📏 Calculate Radius from Municipality Geometry
+        if (municipalitiesDataSource) {
+             const entities = municipalitiesDataSource.entities.values;
+             const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+             
+             // Find matching entity
+             const entity = entities.find(e => {
+                 const raw = e.properties?.NOMBRE_MPI?.getValue();
+                 return raw && normalize(raw) === normalize(newLoc.name);
+             });
+
+             if (entity && entity.polygon && cesiumViewer) {
+                 const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
+                 if (hierarchy) {
+                     const bs = BoundingSphere.fromPoints(hierarchy.positions);
+                     currentRainRadius.value = bs.radius * 0.9; 
+                     currentPolygonCenter.value = bs.center; // 📍 Store Center!
+                     
+                     console.log(`[Rain] Auto-radius for ${newLoc.name}: ${currentRainRadius.value.toFixed(0)}m`);
+                     
+                     // 📐 Compute Local Polygon for Shape Emitter
+                     const localPoly = computeLocalPolygon(hierarchy.positions, bs.center);
+                     currentLocalPolygon.value = localPoly.polygon;
+                     currentLocalBounds.value = localPoly.bounds;
+                 }
+             } else {
+                currentRainRadius.value = 1500.0;
+                currentLocalPolygon.value = [];
+                currentPolygonCenter.value = null;
+             }
+        }
     } else {
         currentWeatherData.value = null;
+        currentPolygonCenter.value = null;
     }
     refreshRainEffect();
     renderDataBars();
