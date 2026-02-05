@@ -32,7 +32,8 @@ import {
   Transforms,
   Matrix3,
   Matrix4,
-  Cartesian4
+  Cartesian4,
+  UrlTemplateImageryProvider
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -491,6 +492,20 @@ onMounted(async () => {
   if (cesiumContainer.value) {
     Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 
+    // 🗺️ Configure Imagery Provider (Stadia with fallback to Bing)
+    const stadiaApiKey = import.meta.env.VITE_STADIA_API_KEY
+    let imageryProvider
+
+    if (stadiaApiKey) {
+      // Use Stadia Maps with API key
+      imageryProvider = new UrlTemplateImageryProvider({
+        url: `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png?api_key=${stadiaApiKey}`,
+        credit: '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors'
+      })
+      console.log('Using Stadia Maps imagery provider')
+    }
+    // If no Stadia key, imageryProvider stays undefined and Cesium will use Bing as default
+
     // Assign to top-level variable
     cesiumViewer = new Viewer(cesiumContainer.value, {
       terrainProvider: await createWorldTerrainAsync({}),
@@ -503,34 +518,21 @@ onMounted(async () => {
       homeButton: false,
       sceneModePicker: false,
       navigationHelpButton: false,
-      baseLayerPicker: true, // ✅ Keep enabled for logic, hide via CSS
+      baseLayerPicker: true, // ✅ Keep enabled for manual switching
     })
+
+    // Set custom imagery provider if Stadia API key is available
+    if (imageryProvider) {
+      cesiumViewer.imageryLayers.removeAll()
+      cesiumViewer.imageryLayers.addImageryProvider(imageryProvider)
+    }
 
     if (cesiumViewer.scene) {
         // ... (existing scene setup) ... 
         
         // 📊 Add Custom Data Source for Bars
         barDataSource = new CustomDataSource('bars');
-        
         cesiumViewer.dataSources.add(barDataSource);
-
-        // ... (existing logic) ...
-        
-        // ... Inside GeoJSON load ...
-        // After loading GeoJSON and filtering, call renderDataBars() once to init
-        
-        // 🌑 Initial Layer: Stadia
-        if (cesiumViewer.baseLayerPicker) {
-            const getProvider = (name: string) => 
-               cesiumViewer?.baseLayerPicker.viewModel.imageryProviderViewModels.find((vm: any) => vm.name === name)
-
-            const stadiaDark = getProvider('Stadia Alidade Smooth Dark')
-            if (stadiaDark) {
-               cesiumViewer.baseLayerPicker.viewModel.selectedImagery = stadiaDark
-            }
-        }
-
-       // ⏳ Time-of-day simulation
       const now = JulianDate.fromDate(new Date())
       const start = JulianDate.addHours(now, -12, new JulianDate())
       const stop = JulianDate.addHours(now, 12, new JulianDate())

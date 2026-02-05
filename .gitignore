@@ -50,3 +50,4 @@ frontend/pnpm-debug.log*
 # Environment
 frontend/.env
 frontend/.env.local
+.vercel
