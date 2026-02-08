@@ -63,14 +63,30 @@ const townDataCache: Record<string, { temp: number, rain: number, humidity: numb
 
 const getTownData = (townName: string) => {
     if (!townDataCache[townName]) {
-        townDataCache[townName] = {
-            temp: 15 + Math.random() * 20, // 15-35 C
-            rain: Math.random() < 0.3 ? 0 : Math.random() * 50, // 0-50 mm
-            humidity: 40 + Math.random() * 60 // 40-100 %
+        // First determine if there's rain (30% chance)
+        const hasRain = Math.random() < 0.3;
+        
+        let temp, humidity, rain;
+        
+        if (hasRain) {
+            // 🌧️ Rainy conditions (cooler temperatures, high humidity)
+            // Equatorial rain temperatures: 18-24°C
+            temp = 18 + Math.random() * 6;
+            humidity = 80 + Math.random() * 20; // 80-100%
+            rain = 5 + Math.random() * 45; // 5-50 mm
+        } else {
+            // ☀️ No rain (warmer temperatures, variable humidity)
+            // Equatorial dry temperatures: 22-35°C
+            temp = 22 + Math.random() * 13;
+            humidity = 40 + Math.random() * 40; // 40-80%
+            rain = 0;
         }
+        
+        townDataCache[townName] = { temp, rain, humidity };
     }
-    return townDataCache[townName]
+    return townDataCache[townName];
 }
+
 
 const handleLayerSwitch = (layerName: string) => {
     if (!cesiumViewer || !cesiumViewer.baseLayerPicker) return
@@ -308,6 +324,44 @@ const createTempBarGradient = (temp: number, maxTemp: number = 50) => {
     return canvas;
 }
 
+// 🌡️ Create Radial Temperature Gradient for Polygon
+const createRadialTempGradient = (temp: number, maxTemp: number = 50) => {
+    const canvas = document.createElement('canvas');
+    const size = 512; // Higher resolution for better quality
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    const ratio = Math.min(Math.max(temp / maxTemp, 0), 1);
+    const centerX = size / 2;
+    const centerY = size / 2;
+    const radius = size / 2;
+
+    // Create radial gradient from center (hot) to edge (cool)
+    const grad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+    
+    // Determine center color based on temperature
+    if (ratio <= 0.5) {
+        // Low to medium temp: Blue center -> Yellow edge
+        const centerColor = interpolateColor('blue', 'yellow', ratio / 0.5);
+        grad.addColorStop(0, centerColor); // Center
+        grad.addColorStop(0.7, 'blue'); // Fade to blue
+        grad.addColorStop(1, 'rgba(0, 0, 255, 0.3)'); // Transparent blue at edge
+    } else {
+        // Medium to high temp: Yellow/Red center -> Yellow/Blue edge
+        const centerColor = interpolateColor('yellow', 'red', (ratio - 0.5) / 0.5);
+        grad.addColorStop(0, centerColor); // Center (yellow to red)
+        grad.addColorStop(0.5, 'yellow'); // Mid yellow
+        grad.addColorStop(0.8, 'blue'); // Fade to blue
+        grad.addColorStop(1, 'rgba(0, 0, 255, 0.3)'); // Transparent blue at edge
+    }
+
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+    return canvas;
+}
+
 const renderDataBars = async () => {
     if (!cesiumViewer || !barDataSource) return;
     
@@ -353,6 +407,19 @@ const renderDataBars = async () => {
     
     let barsAdded = 0;
 
+    // First pass: Reset all polygon materials to default
+    for (let i = 0; i < entities.length; i++) {
+        const entity = entities[i];
+        if (!entity?.polygon) continue;
+        
+        const rawName = entity.properties?.NOMBRE_MPI?.getValue();
+        if (!rawName) continue;
+        
+        // Reset to default cyan transparent material
+        entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.1));
+    }
+
+    // Second pass: Apply temperature gradient only to selected municipality
     for (let i = 0; i < entities.length; i++) {
         const entity = entities[i];
         if (!entity?.polygon) continue; 
@@ -374,7 +441,20 @@ const renderDataBars = async () => {
 
              if (value <= 0) continue; 
 
-             // Calculate Centroid
+             // 🌡️ Special handling for temperature - apply to polygon instead of bar
+             if (mode === 'clear') {
+                 // Apply radial gradient to the polygon material
+                 const material = new ImageMaterialProperty({
+                     image: createRadialTempGradient(value, 50), // Max 50C
+                     transparent: true
+                 });
+                 
+                 entity.polygon.material = material;
+                 console.log(`[TempGradient] Applied radial gradient to ${rawName}: ${value.toFixed(1)}°C`);
+                 continue; // Skip bar creation for temperature
+             }
+
+             // Calculate Centroid for other modes (rain, humidity)
              const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
              if (hierarchy) {
                  const positions = hierarchy.positions;
@@ -396,13 +476,7 @@ const renderDataBars = async () => {
                  console.log(`[BarDebug] Adding bar for ${rawName} [${mode}]: Val=${value.toFixed(1)}`);
                  
                  let material: MaterialProperty | Color = cfg.color;
-                 if (mode === 'clear') {
-                     // 🌡️ Dynamic Heat Gradient
-                     material = new ImageMaterialProperty({
-                         image: createTempBarGradient(value, 50), // Max 50C
-                         transparent: true
-                     });
-                 } else if (cfg.material) {
+                 if (cfg.material) {
                      material = cfg.material;
                  }
 
@@ -492,19 +566,21 @@ onMounted(async () => {
   if (cesiumContainer.value) {
     Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 
-    // 🗺️ Configure Imagery Provider (Stadia with fallback to Bing)
+    // 🗺️ Configure Imagery Provider (Default to Stadia)
     const stadiaApiKey = import.meta.env.VITE_STADIA_API_KEY
     let imageryProvider
 
+    // Always try to use Stadia (with or without API key)
     if (stadiaApiKey) {
-      // Use Stadia Maps with API key
+      // Use Stadia Maps with API key for best quality
       imageryProvider = new UrlTemplateImageryProvider({
         url: `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png?api_key=${stadiaApiKey}`,
         credit: '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors'
       })
-      console.log('Using Stadia Maps imagery provider')
+      console.log('Using Stadia Maps with API key')
     }
-    // If no Stadia key, imageryProvider stays undefined and Cesium will use Bing as default
+    // Note: If no API key, Cesium will use its default imagery (Bing)
+    // User can manually switch to Stadia via base layer picker if using Cesium Ion
 
     // Assign to top-level variable
     cesiumViewer = new Viewer(cesiumContainer.value, {
