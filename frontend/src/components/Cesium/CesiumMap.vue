@@ -59,6 +59,7 @@ let rainSystem: ParticleSystem | null = null
 
 // Data Source for 3D Bars
 let barDataSource: CustomDataSource | null = null
+let fogDataSource: CustomDataSource | null = null // 🌫️ Fog Polygons
 let municipalitiesDataSource: GeoJsonDataSource | null = null // 📍 Added reliable reference
 let cloudCollection: CloudCollection | null = null; // ☁️ Clouds
 
@@ -73,16 +74,23 @@ const getTownData = (townName: string) => {
         let temp, humidity, rain;
         
         if (hasRain) {
-            // 🌧️ Rainy conditions (cooler temperatures, high humidity)
-            // Equatorial rain temperatures: 18-24°C
-            temp = 18 + Math.random() * 6;
-            humidity = 80 + Math.random() * 20; // 80-100%
+            // 🌧️ Rainy: High Humidity, Cooler Temp
+            temp = 16 + Math.random() * 6; // 16-22°C
+            humidity = 85 + Math.random() * 15; // 85-100%
             rain = 5 + Math.random() * 45; // 5-50 mm
         } else {
-            // ☀️ No rain (warmer temperatures, variable humidity)
-            // Equatorial dry temperatures: 22-35°C
-            temp = 22 + Math.random() * 13;
-            humidity = 40 + Math.random() * 40; // 40-80%
+            // No Rain: depends on randomness
+            const isHot = Math.random() > 0.5;
+            
+            if (isHot) {
+                 // ☀️ Hot & Dry
+                 temp = 26 + Math.random() * 9; // 26-35°C
+                 humidity = 30 + Math.random() * 30; // 30-60%
+            } else {
+                 // ☁️ Cool & Humid (Foggy potentially)
+                 temp = 18 + Math.random() * 6; // 18-24°C
+                 humidity = 80 + Math.random() * 20; // Force high humidity (80-100%) for visibility debug
+            }
             rain = 0;
         }
         
@@ -90,7 +98,6 @@ const getTownData = (townName: string) => {
     }
     return townDataCache[townName];
 }
-
 
 const handleLayerSwitch = (layerName: string) => {
     if (!cesiumViewer || !cesiumViewer.baseLayerPicker) return
@@ -631,17 +638,128 @@ const createWidgetCanvas = (townName: string, data: any) => {
     return canvas;
 }
 
+const createFogCanvas = (humidity: number) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    // Base transparency driven by humidity (40-100)
+    // Map 40 -> 0.0, 100 -> 0.9
+    const intensity = Math.max(0, Math.min((humidity - 40) / 60, 1));
+    // If humidity is low, fog is invisible
+    if (intensity <= 0) return canvas;
+
+    const baseAlpha = 0.3 + (intensity * 0.5); // 0.3 to 0.8
+
+    // Clear
+    ctx.clearRect(0, 0, 512, 512);
+
+    // Create softer, more layered fog
+    const particles = 80;
+    
+    for (let i = 0; i < particles; i++) {
+        const x = Math.random() * 512;
+        const y = Math.random() * 512;
+        const r = 40 + Math.random() * 120; // Larger puffs
+        
+        // Non-uniform scaling for wisps
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.scale(1 + Math.random(), 1 + Math.random());
+        
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+        grad.addColorStop(0, `rgba(240, 245, 255, ${0.08 * baseAlpha})`); // Very faint core
+        grad.addColorStop(0.5, `rgba(230, 240, 255, ${0.04 * baseAlpha})`); 
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+    
+    // Overall wash
+    ctx.fillStyle = `rgba(220, 230, 245, ${0.1 * baseAlpha})`;
+    ctx.fillRect(0,0,512,512);
+
+    return canvas;
+}
+
+const createSoftFogMaterial = (positions: Cartesian3[], center: Cartesian3, humidity: number) => {
+    // 1. Get Local 2D Polygon
+    const { polygon, bounds } = computeLocalPolygon(positions, center);
+    console.log('🌫️ createSoftFogMaterial. Humidity:', humidity);
+    
+    const size = 512;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return canvas;
+
+    // Map bounds to canvas
+    const width = bounds.maxX - bounds.minX;
+    const height = bounds.maxY - bounds.minY;
+    
+    // 2. Draw Blurred White Polygon (The Mask)
+    // Draw scaled down first to make blur more effective relative to shape?
+    // Or just draw and blur.
+    
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    polygon.forEach((p, i) => {
+        const x = ((p.x - bounds.minX) / width) * size;
+        const y = size - (((p.y - bounds.minY) / height) * size);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.clip(); // ✂️ Clip to Polygon (Sharp for now, to ensure visibility)
+    
+    // Draw Simple Fog Noise
+    // ⚠️ High Visibility Mode
+    const baseAlpha = 0.8; 
+    
+    // Background wash 
+    ctx.fillStyle = `rgba(200, 220, 255, ${0.5 * baseAlpha})`;
+    ctx.fillRect(0,0,size,size);
+    
+    const particles = 100;
+    for (let i = 0; i < particles; i++) {
+        const x = Math.random() * size;
+        const y = Math.random() * size;
+        const r = 40 + Math.random() * 80; 
+        
+        ctx.save();
+        ctx.translate(x, y);
+        
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+        grad.addColorStop(0, `rgba(255, 255, 255, ${0.9 * baseAlpha})`); // 
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+    
+    return canvas;
+}
+
 const renderWeatherWidgets = async () => {
-    if (!cesiumViewer || !barDataSource) return;
+    if (!cesiumViewer || !barDataSource || !fogDataSource) return;
     
     barDataSource.entities.removeAll();
+    fogDataSource.entities.removeAll();
 
     // 🔒 Filter: Only show if a location is selected
     if (!selectedLocation.value) return;
 
     const activeModes = currentWeatherMode.value;
-    // Don't return early here! We must loop to RESET the polygons if modes are empty.
-    // if (activeModes.length === 0) return;
     
     if (!municipalitiesDataSource) return;
 
@@ -655,24 +773,19 @@ const renderWeatherWidgets = async () => {
         const rawName = entity.properties?.NOMBRE_MPI?.getValue();
         if (!rawName) continue;
         
-        // Reset to default
+        // Reset Base Polygon to default first
         entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.05));
-        
-        // Only target selected? Or all? User wants "something like that" referring to image with MULTIPLE widgets?
-        // The prompt said "selected section of the map".
-        // But the reference image shows multiple widgets. 
-        // Let's stick to selected ONLY for now to avoid clutter, as per previous logic.
         
         if (rawName !== selectedLocation.value.name) continue;
 
         const data = getTownData(rawName);
 
-        // 1. Apply Cyber Glow to Polygon
-        // Calculate Centroid & Hierarchy first
+        // Calculate Centroid & Hierarchy
         let center: Cartesian3 | null = null;
         let positions: Cartesian3[] = [];
-        
-        const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
+        let hierarchy: any = null;
+
+        hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
         if (hierarchy) {
              positions = hierarchy.positions;
              const boundingSphere = BoundingSphere.fromPoints(positions);
@@ -681,7 +794,7 @@ const renderWeatherWidgets = async () => {
         
         if (!center) continue;
 
-        // Apply Glow Gradient ONLY if 'clear' (Temperature) mode is active
+        // 1. Base Layer: Temperature (Clear Mode) - Inner Glow
         if (activeModes.includes('clear')) {
              const material = new ImageMaterialProperty({
                   image: createShapeGradient(positions, center, data.temp, 40), 
@@ -689,11 +802,26 @@ const renderWeatherWidgets = async () => {
              });
              entity.polygon.material = material;
         }
-        
-        // 2. Add Floating Widget ONLY if modes are active?
-        // Or should we show it always if selected?
-        // User said "disabling enabling the panel" implying they expect panel to toggle.
-        // So let's respect that: only show if at least one mode is active.
+
+        // 2. Fog Layer: Humidity Mode - Separate Entity above ground
+        if (activeModes.includes('humidity')) {
+             fogDataSource.entities.add({
+                 polygon: {
+                     hierarchy: hierarchy,
+                     heightReference: HeightReference.RELATIVE_TO_GROUND,
+                     height: 100, // 100m above ground (Fog layer)
+                     extrudedHeight: 300, // Optional: Give it some thickness? No, let's keep it flat for now or use extruded for volume.
+                     // Let's stick to flat plane for now but lower.
+                     material: new ImageMaterialProperty({
+                          image: createSoftFogMaterial(positions, center, data.humidity), // 🌫️ Use Soft Masked Fog
+                          transparent: true
+                     }),
+                 }
+             });
+             console.log('☁️ Fog Entity Added for:', rawName, 'Relative Height:', 100);
+        }
+
+        // 3. Floating Widget
         if (activeModes.length > 0) {
             barDataSource.entities.add({
                  position: center, // Centroid
@@ -702,11 +830,10 @@ const renderWeatherWidgets = async () => {
                      scale: 1.0,
                      pixelOffset: new Cartesian2(0, -100), // Float up
                      verticalOrigin: VerticalOrigin.BOTTOM,
-                     disableDepthTestDistance: Number.POSITIVE_INFINITY, // Always on top? Or allow occlude?
-                     // Let's allow occlusion naturally, but maybe offset z?
+                     disableDepthTestDistance: Number.POSITIVE_INFINITY, 
                      heightReference: HeightReference.RELATIVE_TO_GROUND
                  }
-            });
+             });
         }
     }
 }
@@ -843,6 +970,10 @@ onMounted(async () => {
         // 📊 Add Custom Data Source for Bars
         barDataSource = new CustomDataSource('bars');
         cesiumViewer.dataSources.add(barDataSource);
+
+        // 🌫️ Add Data Source for Fog
+        fogDataSource = new CustomDataSource('fog');
+        cesiumViewer.dataSources.add(fogDataSource);
       const now = JulianDate.fromDate(new Date())
       const start = JulianDate.addHours(now, -12, new JulianDate())
       const stop = JulianDate.addHours(now, 12, new JulianDate())
