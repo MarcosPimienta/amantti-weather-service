@@ -36,7 +36,11 @@ import {
   UrlTemplateImageryProvider,
   CloudCollection,
   ProviderViewModel,
-  VerticalOrigin
+  VerticalOrigin,
+  EllipsoidGraphics,
+  Quaternion,
+  HeadingPitchRoll,
+  Matrix2
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -688,66 +692,107 @@ const createFogCanvas = (humidity: number) => {
     return canvas;
 }
 
-const createSoftFogMaterial = (positions: Cartesian3[], center: Cartesian3, humidity: number) => {
-    // 1. Get Local 2D Polygon
-    const { polygon, bounds } = computeLocalPolygon(positions, center);
-    console.log('🌫️ createSoftFogMaterial. Humidity:', humidity);
-    
+const createDomeFogTexturedMaterial = (humidity: number) => {
     const size = 512;
     const canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const ctx = canvas.getContext('2d');
     if (!ctx) return canvas;
 
-    // Map bounds to canvas
-    const width = bounds.maxX - bounds.minX;
-    const height = bounds.maxY - bounds.minY;
+    // Clear
+    ctx.clearRect(0, 0, size, size);
+
+    // 🌫️ Volumetric Dome Texture
+    // Radial Gradient: White center -> Transparent edge
+    const cx = size / 2;
+    const cy = size / 2;
+    const radius = size / 2;
+
+    const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
     
-    // 2. Draw Blurred White Polygon (The Mask)
-    // Draw scaled down first to make blur more effective relative to shape?
-    // Or just draw and blur.
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.beginPath();
-    polygon.forEach((p, i) => {
-        const x = ((p.x - bounds.minX) / width) * size;
-        const y = size - (((p.y - bounds.minY) / height) * size);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.clip(); // ✂️ Clip to Polygon (Sharp for now, to ensure visibility)
-    
-    // Draw Simple Fog Noise
-    // ⚠️ High Visibility Mode
-    const baseAlpha = 0.8; 
-    
-    // Background wash 
-    ctx.fillStyle = `rgba(200, 220, 255, ${0.5 * baseAlpha})`;
-    ctx.fillRect(0,0,size,size);
-    
-    const particles = 100;
+    // Intensity based on humidity
+    // 0.3 min opacity + up to 0.5 more based on humidity
+    const intensity = Math.max(0.3, Math.min((humidity - 20) / 80, 1)); 
+    const centerAlpha = 0.6 + (intensity * 0.4); // 0.6 to 1.0
+
+    gradient.addColorStop(0, `rgba(255, 255, 255, ${centerAlpha})`);   // Core
+    gradient.addColorStop(0.4, `rgba(245, 250, 255, ${centerAlpha * 0.8})`); 
+    gradient.addColorStop(0.7, `rgba(240, 245, 255, ${centerAlpha * 0.4})`);
+    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)'); // Edge
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, size, size);
+
+    // Add some noise for "fluffiness"
+    const particles = 200;
     for (let i = 0; i < particles; i++) {
         const x = Math.random() * size;
         const y = Math.random() * size;
-        const r = 40 + Math.random() * 80; 
+        const r = 20 + Math.random() * 60;
         
+        // Only draw if inside circle roughly
+        const d = Math.sqrt((x-cx)*(x-cx) + (y-cy)*(y-cy));
+        if (d > radius) continue;
+
         ctx.save();
         ctx.translate(x, y);
+        const pGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+        pGrad.addColorStop(0, `rgba(255, 255, 255, ${0.15 * centerAlpha})`);
+        pGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
         
-        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-        grad.addColorStop(0, `rgba(255, 255, 255, ${0.9 * baseAlpha})`); // 
-        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        
-        ctx.fillStyle = grad;
+        ctx.fillStyle = pGrad;
         ctx.beginPath();
         ctx.arc(0, 0, r, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
     }
-    
+
     return canvas;
+}
+
+const computeOrientedBounds = (positions: Cartesian3[], center: Cartesian3) => {
+    // 1. Compute Local Frame (ENU) at Center
+    const toFixed = Transforms.eastNorthUpToFixedFrame(center);
+    const toLocal = Matrix4.inverse(toFixed, new Matrix4());
+    
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    
+    for (const pos of positions) {
+        const localPos = Matrix4.multiplyByPoint(toLocal, pos, new Cartesian3());
+        
+        if (localPos.x < minX) minX = localPos.x;
+        if (localPos.x > maxX) maxX = localPos.x;
+        if (localPos.y < minY) minY = localPos.y;
+        if (localPos.y > maxY) maxY = localPos.y;
+    }
+    
+    const width = maxX - minX;
+    const height = maxY - minY;
+    
+    // Local Center of the Bounds (midpoint of min/max)
+    // Note: This center might be slightly offset from the polygon centroid (input 'center')
+    const localCenter = new Cartesian3(
+        (minX + maxX) / 2, 
+        (minY + maxY) / 2, 
+        0.0 
+    );
+    
+    // Transform local center back to World Fixed Frame
+    const boundsCenter = Matrix4.multiplyByPoint(toFixed, localCenter, new Cartesian3());
+    
+    // Orientation: Just the ENU frame orientation
+    // Extract rotation matrix from 'toFixed' transform
+    const rotationMatrix = new Matrix3();
+    Matrix4.getMatrix3(toFixed, rotationMatrix);
+    const rotation = Quaternion.fromRotationMatrix(rotationMatrix);
+    
+    return {
+        center: boundsCenter,
+        rotation: rotation,
+        width: width,
+        height: height
+    };
 }
 
 const renderWeatherWidgets = async () => {
@@ -803,22 +848,32 @@ const renderWeatherWidgets = async () => {
              entity.polygon.material = material;
         }
 
-        // 2. Fog Layer: Humidity Mode - Separate Entity above ground
-        if (activeModes.includes('humidity')) {
-             fogDataSource.entities.add({
-                 polygon: {
-                     hierarchy: hierarchy,
-                     heightReference: HeightReference.RELATIVE_TO_GROUND,
-                     height: 100, // 100m above ground (Fog layer)
-                     extrudedHeight: 300, // Optional: Give it some thickness? No, let's keep it flat for now or use extruded for volume.
-                     // Let's stick to flat plane for now but lower.
-                     material: new ImageMaterialProperty({
-                          image: createSoftFogMaterial(positions, center, data.humidity), // 🌫️ Use Soft Masked Fog
-                          transparent: true
-                     }),
-                 }
-             });
-             console.log('☁️ Fog Entity Added for:', rawName, 'Relative Height:', 100);
+        // 2. Fog Layer: Humidity/Rain Mode - "Oriented Fog Dome"
+        if (activeModes.includes('humidity') || activeModes.includes('rain')) {
+             if (hierarchy) {
+                 const bounds = computeOrientedBounds(positions, center);
+                 
+                 // Radius of the ellipsoid
+                 // Use 1/2 width and height since radii are half-axes
+                 const radiusX = bounds.width * 0.55;  // Slightly larger than half-width to cover corners
+                 const radiusY = bounds.height * 0.55; 
+                 
+                 // Height: Proportional to the average size, but flattened
+                 const avgSize = (radiusX + radiusY) / 2;
+                 const height = avgSize * 0.5; 
+
+                 fogDataSource.entities.add({
+                     position: bounds.center,
+                     orientation: bounds.rotation,
+                     ellipsoid: new EllipsoidGraphics({
+                         radii: new Cartesian3(radiusX, radiusY, height),
+                         material: new ImageMaterialProperty({
+                             image: createDomeFogTexturedMaterial(data.humidity),
+                             transparent: true
+                         }),
+                     })
+                 });
+             }
         }
 
         // 3. Floating Widget
