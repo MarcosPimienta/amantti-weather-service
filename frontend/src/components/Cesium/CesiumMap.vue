@@ -33,7 +33,10 @@ import {
   Matrix3,
   Matrix4,
   Cartesian4,
-  UrlTemplateImageryProvider
+  UrlTemplateImageryProvider,
+  CloudCollection,
+  ProviderViewModel,
+  VerticalOrigin
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -57,6 +60,7 @@ let rainSystem: ParticleSystem | null = null
 // Data Source for 3D Bars
 let barDataSource: CustomDataSource | null = null
 let municipalitiesDataSource: GeoJsonDataSource | null = null // 📍 Added reliable reference
+let cloudCollection: CloudCollection | null = null; // ☁️ Clouds
 
 // Mock Data Cache to keep values consistent
 const townDataCache: Record<string, { temp: number, rain: number, humidity: number }> = {}
@@ -189,8 +193,14 @@ class PolygonEmitter {
                 return; // Success
             }
         }
-        // If we fail 10 times, kill the particle
-        particle.life = 0; 
+        // If we fail 10 times, kill the particle but ensure it has valid data to prevent crashes
+        particle.life = 0.0; 
+        particle.position.x = this._bounds.minX;
+        particle.position.y = this._bounds.minY;
+        particle.position.z = this._minZ;
+        particle.velocity.x = 0;
+        particle.velocity.y = 0;
+        particle.velocity.z = -1.0; // Non-zero just in case
     }
 }
 
@@ -286,128 +296,341 @@ const refreshRainEffect = () => {
     }
 }
 
-const createTempBarGradient = (temp: number, maxTemp: number = 50) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 64;
-    canvas.height = 256;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return canvas;
+// ☁️ Cloud Settings (Reactive)
+const cloudSettings = ref({
+    maxSizeX: 25000,
+    maxSizeY: 15000,
+    maxSizeZ: 5000,
+    textureScale: 20, 
+    slice: 0.5,
+    brightness: 1.0,
+    altitude: 5000,
+    count: 30
+});
 
-    const ratio = Math.min(Math.max(temp / maxTemp, 0), 1);
-    
-    // Gradient from 0 to Ratio of the full scale
-    // Full Scale: 0.0 (Blue) -> 0.5 (Yellow) -> 1.0 (Red)
-    
-    const grad = ctx.createLinearGradient(0, 256, 0, 0); // Bottom to Top
-    
-    // Always start at Blue
-    grad.addColorStop(0, 'blue');
-    
-    if (ratio <= 0.5) {
-        // Range is [0, ratio] which is sub-segment of [0, 0.5] (Blue->Yellow)
-        // End color is interp(Blue, Yellow, ratio / 0.5)
-        const endColor = interpolateColor('blue', 'yellow', ratio / 0.5);
-        grad.addColorStop(1, endColor);
-    } else {
-        // Range crosses Yellow (0.5)
-        // Yellow happens at 0.5 / ratio in local space
-        const yellowPos = 0.5 / ratio;
-        grad.addColorStop(yellowPos, 'yellow');
-        
-        // End color is interp(Yellow, Red, (ratio - 0.5) / 0.5)
-        const endColor = interpolateColor('yellow', 'red', (ratio - 0.5) / 0.5);
-        grad.addColorStop(1, endColor);
+const refreshCloudEffect = () => {
+    if (!cesiumViewer) return;
+
+    if (cloudCollection) {
+        cesiumViewer.scene.primitives.remove(cloudCollection);
+        cloudCollection = null;
     }
 
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 64, 256);
-    return canvas;
+    const location = selectedLocation.value;
+    const data = currentWeatherData.value;
+
+    if (!location || !data) return;
+
+    // Debug logs
+    console.log(`[CloudDebug] Refreshing. Mode: ${currentWeatherMode.value}, Data:`, data);
+    console.log(`[CloudDebug] Settings:`, cloudSettings.value);
+
+    // Show clouds on rain or if humidity is high
+    if (currentWeatherMode.value.includes('rain') || (currentWeatherMode.value.includes('humidity') && data.humidity > 60)) {
+         cloudCollection = new CloudCollection({
+             noiseDetail: 16.0, // Fixed detail for Cumulus
+             noiseOffset: Math.random() * 1000.0
+         });
+
+         const count = cloudSettings.value.count;
+         console.log(`[CloudDebug] Spawning ${count} clouds...`);
+
+        if (currentPolygonCenter.value && currentLocalPolygon.value.length > 0) {
+             const center = currentPolygonCenter.value;
+             const toFixed = Transforms.eastNorthUpToFixedFrame(center);
+             const bounds = currentLocalBounds.value;
+             const polygon = currentLocalPolygon.value;
+             
+             let added = 0;
+             let attempts = 0;
+             const maxAttempts = count * 20; 
+             
+             while (added < count && attempts < maxAttempts) {
+                 const x = CesiumMath.randomBetween(bounds.minX, bounds.maxX);
+                 const y = CesiumMath.randomBetween(bounds.minY, bounds.maxY);
+                 
+                 if (pointInPolygon({x, y}, polygon)) {
+                     // Inside!
+                     const z = CesiumMath.randomBetween(cloudSettings.value.altitude - 500, cloudSettings.value.altitude + 500); 
+                     
+                     const localPos = new Cartesian3(x, y, z);
+                     const worldPos = Matrix4.multiplyByPoint(toFixed, localPos, new Cartesian3());
+                     
+                     // ☁️ Cumulus Cloud Properties
+                     const maxWidth = cloudSettings.value.maxSizeX;
+                     const maxLength = cloudSettings.value.maxSizeY;
+                     const maxHeight = cloudSettings.value.maxSizeZ;
+                     
+                     // Randomize slightly based on max size
+                     const sizeX = maxWidth * (0.8 + Math.random() * 0.4);
+                     const sizeY = maxLength * (0.8 + Math.random() * 0.4);
+                     const sizeZ = maxHeight * (0.8 + Math.random() * 0.4);
+                     
+                     const texScale = cloudSettings.value.textureScale;
+
+                     cloudCollection.add({
+                         position: worldPos,
+                         scale: new Cartesian2(texScale, texScale), 
+                         maximumSize: new Cartesian3(sizeX, sizeY, sizeZ), 
+                         slice: cloudSettings.value.slice, 
+                         brightness: cloudSettings.value.brightness 
+                     });
+
+                     added++;
+                 }
+                 attempts++;
+             }
+             console.log(`[CloudDebug] Polygon Spawn: Added ${added} clouds.`);
+         } else {
+             // Fallback for no polygon
+             const center = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + cloudSettings.value.altitude);
+             const spread = 20000; 
+
+             for (let i = 0; i < count; i++) {
+                 const x = center.x + (Math.random() - 0.5) * spread;
+                 const y = center.y + (Math.random() - 0.5) * spread;
+                 const z = center.z + (Math.random() - 0.5) * 1000;
+
+                 cloudCollection.add({
+                     position: new Cartesian3(x, y, z),
+                     scale: new Cartesian2(cloudSettings.value.textureScale, cloudSettings.value.textureScale),
+                     maximumSize: new Cartesian3(cloudSettings.value.maxSizeX, cloudSettings.value.maxSizeY, cloudSettings.value.maxSizeZ),
+                     slice: cloudSettings.value.slice,
+                     brightness: cloudSettings.value.brightness
+                 });
+             }
+         }
+         
+         cesiumViewer.scene.primitives.add(cloudCollection);
+    }
 }
 
-// 🌡️ Create Radial Temperature Gradient for Polygon
-const createRadialTempGradient = (temp: number, maxTemp: number = 50) => {
+const updateCloudSettings = (newSettings: any) => {
+    Object.assign(cloudSettings.value, newSettings);
+    refreshCloudEffect();
+};
+
+
+
+// ------------------------------------------------------------------
+// 🌡️ Create Shape-Based Temperature Gradient (Inner Glow)
+// ------------------------------------------------------------------
+const createShapeGradient = (positions: Cartesian3[], center: Cartesian3, temp: number, maxTemp: number = 35) => {
+    // 1. Get Local 2D Polygon (normalized 0..1 relative to bounds)
+    // We reuse the logic but need to map to canvas 0..512 ignoring aspect ratio (Cesium handles UV stretch)
+    
+    const { polygon, bounds } = computeLocalPolygon(positions, center);
+    
     const canvas = document.createElement('canvas');
-    const size = 512; // Higher resolution for better quality
+    const size = 256; // Smaller texture is faster and sufficient for blur
     canvas.width = size;
     canvas.height = size;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return canvas;
 
-    const ratio = Math.min(Math.max(temp / maxTemp, 0), 1);
-    const centerX = size / 2;
-    const centerY = size / 2;
-    const radius = size / 2;
-
-    // Create radial gradient from center (hot) to edge (cool)
-    const grad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+    // Map bounds to full canvas size (0..size) to utilize resolution
+    const width = bounds.maxX - bounds.minX;
+    const height = bounds.maxY - bounds.minY;
     
-    // Determine center color based on temperature
-    if (ratio <= 0.5) {
-        // Low to medium temp: Blue center -> Yellow edge
-        const centerColor = interpolateColor('blue', 'yellow', ratio / 0.5);
-        grad.addColorStop(0, centerColor); // Center
-        grad.addColorStop(0.7, 'blue'); // Fade to blue
-        grad.addColorStop(1, 'rgba(0, 0, 255, 0.3)'); // Transparent blue at edge
-    } else {
-        // Medium to high temp: Yellow/Red center -> Yellow/Blue edge
-        const centerColor = interpolateColor('yellow', 'red', (ratio - 0.5) / 0.5);
-        grad.addColorStop(0, centerColor); // Center (yellow to red)
-        grad.addColorStop(0.5, 'yellow'); // Mid yellow
-        grad.addColorStop(0.8, 'blue'); // Fade to blue
-        grad.addColorStop(1, 'rgba(0, 0, 255, 0.3)'); // Transparent blue at edge
-    }
+    // Draw Polygon in White
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    polygon.forEach((p, i) => {
+        // Normalize 0..1 then scale to size
+        // Note: Y might need flip? Usually Cesium UV (0,0) is bottom-left? 
+        // Let's just draw standard. If inverted, we can flip Y here.
+        // Assuming standard canvas coordinates.
+        const x = ((p.x - bounds.minX) / width) * size;
+        const y = size - (((p.y - bounds.minY) / height) * size); // Flip Y to match Bottom-Up UV?
+        
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fill();
 
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, size, size);
+    // Apply Blur to create "Distance Field"
+    // We can't use CSS filter easily on offscreen canvas in all browsers, but ctx.filter works in modern ones
+    // Or we can just draw it multiple times with offsets? 
+    // Simplest: use ctx.filter
+    
+    const tempRatio = Math.min(Math.max(temp / maxTemp, 0), 1);
+    
+    // Create a generic "Heat" map from the shape
+    // We want the center to be 1.0, edge to be 0.0
+    // The blur spreads the white out. We want "Inset" blur.
+    
+    // Better approach for "Inner Glow":
+    // 1. Clear.
+    // 2. Draw Polygon (Clip).
+    // 3. Draw a Shadow or Blur INSIDE?
+    // Hard to do "Inset Blur".
+    
+    // Pixel Processing Approach:
+    // 1. Draw White Polygon.
+    // 2. Apply Heavy Blur.
+    // 3. Mask with Original Polygon (Sharp).
+    // This gives soft edges inside, sharp edges outside.
+    
+    // Customize Colors: Combine "Cyber Glow" shape with "Temperature" Heatmap
+    // Mix between Edge Color (Deep Blue) and Center Color (Temp Dependent)
+    
+    // 1. Calculate Center Color (Heatmap)
+    let r, g, b;
+    if (tempRatio < 0.5) {
+        // Blue to Yellow
+        const t = tempRatio * 2;
+        r = Math.floor(t * 255);
+        g = Math.floor(t * 255);
+        b = Math.floor(255 * (1 - t));
+    } else {
+        // Yellow to Red
+        const t = (tempRatio - 0.5) * 2;
+        r = 255;
+        g = Math.floor(255 * (1 - t));
+        b = 0;
+    }
+    
+    // 2. Edge Color (Deep Blue/Transparent)
+    const baseR = 0, baseG = 20, baseB = 100;
+    
+    // Apply Blur to the specific Shape
+    ctx.filter = 'blur(20px)'; // Adjust blur amount based on size
+    // Re-draw polygon with white (intensity)
+    ctx.fill();
+    ctx.filter = 'none';
+    
+    // Get Data
+    const imgData = ctx.getImageData(0, 0, size, size);
+    const data = imgData.data;
+    
+    // Simple Distance-ish Map:
+    // Intensity (Alpha/White) determines mix between EdgeColor and CenterColor
+    for (let i = 0; i < data.length; i += 4) {
+        const intensity = data[i + 3] ?? 0; // Alpha channel (from blur)
+        
+        if (intensity < 10) {
+             data[i + 3] = 0; // Transparent outside
+             continue;
+        }
+        
+        const alpha = intensity / 255; // 0..1 (1 = Center/Thick, 0 = Edge)
+        
+        // Non-Linear map to make the core distinct
+        const mix = Math.pow(alpha, 1.5); 
+        
+        // Mix Colors
+        data[i] = (r * mix) + (baseR * (1 - mix));
+        data[i + 1] = (g * mix) + (baseG * (1 - mix));
+        data[i + 2] = (b * mix) + (baseB * (1 - mix));
+
+        // Alpha: heavily fade edges
+        data[i + 3] = Math.max(0, Math.floor(mix * 200)); 
+    }
+    
+    // Put back
+    ctx.putImageData(imgData, 0, 0);
+    
+    // FINAL PASS: Clip to sharp polygon to remove outside blur
+    // To do this, we need to draw the polygon again as a mask?
+    // Composite 'destination-in' with sharp polygon?
+    
+    const finalCanvas = document.createElement('canvas');
+    finalCanvas.width = size;
+    finalCanvas.height = size;
+    const fCtx = finalCanvas.getContext('2d');
+    if (!fCtx) return canvas;
+    
+    // Draw Blurred Image
+    fCtx.drawImage(canvas, 0, 0);
+    
+    // Mask with Sharp Polygon
+    fCtx.globalCompositeOperation = 'destination-in';
+    fCtx.beginPath();
+    polygon.forEach((p, i) => {
+        const x = ((p.x - bounds.minX) / width) * size;
+        const y = size - (((p.y - bounds.minY) / height) * size);
+        if (i === 0) fCtx.moveTo(x, y);
+        else fCtx.lineTo(x, y);
+    });
+    fCtx.closePath();
+    fCtx.fill();
+    
+    return finalCanvas;
+}
+
+
+// ------------------------------------------------------------------
+// 🏷️ Create Widget Canvas (Floating Card)
+// ------------------------------------------------------------------
+const createWidgetCanvas = (townName: string, data: any) => {
+    const canvas = document.createElement('canvas');
+    const w = 256;
+    const h = 128;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+    
+    // Background: Dark Glass
+    ctx.fillStyle = 'rgba(20, 20, 40, 0.85)';
+    ctx.beginPath();
+    // Rounded rect
+    const r = 16;
+    ctx.roundRect(10, 10, w - 20, h - 20, r);
+    ctx.fill();
+    
+    // Border: Neon Cyan
+    ctx.strokeStyle = '#00FFFF';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    
+    // Text: Town Name
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(townName.toUpperCase(), w/2, 40);
+    
+    // Icon (Emoji for now)
+    const isRain = data.rain > 0;
+    const emoji = isRain ? '🌧️' : '☀️';
+    ctx.font = '50px sans-serif';
+    ctx.fillText(emoji, 60, 95);
+    
+    // Weather Data
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = 'bold 36px monospace';
+    ctx.fillText(`${data.temp.toFixed(0)}°`, 110, 80);
+    
+    ctx.font = '16px monospace';
+    ctx.fillStyle = '#AAAAAA';
+    
+    if (isRain) {
+        ctx.fillText(`${data.rain.toFixed(1)}mm`, 110, 100);
+    } else {
+        ctx.fillText(`Clear`, 110, 100);
+    }
+    
     return canvas;
 }
 
-const renderDataBars = async () => {
+const renderWeatherWidgets = async () => {
     if (!cesiumViewer || !barDataSource) return;
     
-    // Debug log
-    console.log(`[BarDebug] Render called. Modes: ${currentWeatherMode.value.join(', ')}`);
-
     barDataSource.entities.removeAll();
 
     // 🔒 Filter: Only show if a location is selected
-    if (!selectedLocation.value) {
-        console.log("[BarDebug] No location selected. Clearing bars.");
-        return;
-    }
+    if (!selectedLocation.value) return;
 
     const activeModes = currentWeatherMode.value;
     if (activeModes.length === 0) return;
-
-    // Scalar configs with Offsets (in degrees, approx)
-    // 0.015 degrees is roughly ~1.5km at equator, good enough for separation
-    type ModeConfig = { scale: number; color: Color; material?: MaterialProperty; prop: 'temp' | 'rain' | 'humidity'; label: string; offsetLon: number; offsetLat: number };
     
-    const config: Record<string, ModeConfig> = {
-        'clear': { 
-            scale: 200, 
-            color: Color.ORANGE, 
-            // Material will be generated dynamically
-            prop: 'temp', 
-            label: 'Temp', 
-            offsetLon: 0, 
-            offsetLat: 0 
-        }, 
-        'rain': { scale: 500, color: Color.DEEPSKYBLUE, prop: 'rain', label: 'Rain', offsetLon: 0.015, offsetLat: 0 },
-        'humidity': { scale: 100, color: Color.WHITESMOKE.withAlpha(0.8), prop: 'humidity', label: 'Hum', offsetLon: -0.015, offsetLat: 0 }
-    }
-    
-    // Use specific data source
-    if (!municipalitiesDataSource) {
-        console.warn("[BarDebug] No municipalities data source found yet.");
-        return;
-    }
+    if (!municipalitiesDataSource) return;
 
     const entities = municipalitiesDataSource.entities.values;
-    
-    let barsAdded = 0;
 
-    // First pass: Reset all polygon materials to default
+    // Reset loop
     for (let i = 0; i < entities.length; i++) {
         const entity = entities[i];
         if (!entity?.polygon) continue;
@@ -415,110 +638,73 @@ const renderDataBars = async () => {
         const rawName = entity.properties?.NOMBRE_MPI?.getValue();
         if (!rawName) continue;
         
-        // Reset to default cyan transparent material
-        entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.1));
-    }
-
-    // Second pass: Apply temperature gradient only to selected municipality
-    for (let i = 0; i < entities.length; i++) {
-        const entity = entities[i];
-        if (!entity?.polygon) continue; 
+        // Reset to default
+        entity.polygon.material = new ColorMaterialProperty(Color.CYAN.withAlpha(0.05));
         
-        const rawName = entity.properties?.NOMBRE_MPI?.getValue();
-        if (!rawName) continue;
-
-        // 🎯 Exact Match Filter: Only show for selected town
+        // Only target selected? Or all? User wants "something like that" referring to image with MULTIPLE widgets?
+        // The prompt said "selected section of the map".
+        // But the reference image shows multiple widgets. 
+        // Let's stick to selected ONLY for now to avoid clutter, as per previous logic.
+        
         if (rawName !== selectedLocation.value.name) continue;
 
         const data = getTownData(rawName);
 
-        // Iterate over all active modes
-        for (const mode of activeModes) {
-             const cfg = config[mode];
-             if (!cfg) continue;
-
-             const value = data[cfg.prop];
-
-             if (value <= 0) continue; 
-
-             // 🌡️ Special handling for temperature - apply to polygon instead of bar
-             if (mode === 'clear') {
-                 // Apply radial gradient to the polygon material
-                 const material = new ImageMaterialProperty({
-                     image: createRadialTempGradient(value, 50), // Max 50C
-                     transparent: true
-                 });
-                 
-                 entity.polygon.material = material;
-                 console.log(`[TempGradient] Applied radial gradient to ${rawName}: ${value.toFixed(1)}°C`);
-                 continue; // Skip bar creation for temperature
-             }
-
-             // Calculate Centroid for other modes (rain, humidity)
-             const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
-             if (hierarchy) {
-                 const positions = hierarchy.positions;
-                 const boundingSphere = BoundingSphere.fromPoints(positions);
-                 const center = boundingSphere.center;
-                 
-                 const carto = Cartographic.fromCartesian(center);
-                 const shiftedLon = carto.longitude + CesiumMath.toRadians(cfg.offsetLon * (180/Math.PI)); // Convert offset deg to rad? No, offset is in degrees, so convert scale.
-                 // Wait, carto.longitude is in Radians. 
-                 // My offsetLon is in Degrees.
-                 // So: newLonRad = oldLonRad + toRadians(offsetDeg)
-                 
-                 const finalLon = carto.longitude + CesiumMath.toRadians(cfg.offsetLon);
-                 const finalLat = carto.latitude + CesiumMath.toRadians(cfg.offsetLat);
-
-                 // Height calculation
-                 const barHeight = value * cfg.scale * 2;
-                 
-                 console.log(`[BarDebug] Adding bar for ${rawName} [${mode}]: Val=${value.toFixed(1)}`);
-                 
-                 let material: MaterialProperty | Color = cfg.color;
-                 if (cfg.material) {
-                     material = cfg.material;
-                 }
-
-                 // Create Bar Entity
-                 barDataSource.entities.add({
-                     position: Cartesian3.fromRadians(
-                         finalLon,
-                         finalLat,
-                         0
-                     ),
-                     box: {
-                         dimensions: new Cartesian3(1500, 1500, barHeight), // Slightly thinner bars to fit side-by-side
-                         material: material,
-                         outline: false,
-                         heightReference: HeightReference.CLAMP_TO_GROUND
-                     }
-                 });
-                 barsAdded++;
-             }
+        // 1. Apply Cyber Glow to Polygon
+        // Calculate Centroid & Hierarchy first
+        let center: Cartesian3 | null = null;
+        let positions: Cartesian3[] = [];
+        
+        const hierarchy = entity.polygon.hierarchy?.getValue(cesiumViewer.clock.currentTime);
+        if (hierarchy) {
+             positions = hierarchy.positions;
+             const boundingSphere = BoundingSphere.fromPoints(positions);
+             center = boundingSphere.center;
         }
+        
+        if (!center) continue;
+
+        // Apply Glow Gradient
+        const material = new ImageMaterialProperty({
+             image: createShapeGradient(positions, center, data.temp, 40), 
+             transparent: true
+        });
+        entity.polygon.material = material;
+        
+        // 2. Add Floating Widget
+        // Add Billboard
+        barDataSource.entities.add({
+             position: center, // Centroid
+             billboard: {
+                 image: createWidgetCanvas(rawName, data),
+                 scale: 1.0,
+                 pixelOffset: new Cartesian2(0, -100), // Float up
+                 verticalOrigin: VerticalOrigin.BOTTOM,
+                 disableDepthTestDistance: Number.POSITIVE_INFINITY, // Always on top? Or allow occlude?
+                 // Let's allow occlusion naturally, but maybe offset z?
+                 heightReference: HeightReference.RELATIVE_TO_GROUND
+             }
+        });
     }
-    console.log(`[BarDebug] Total bars added: ${barsAdded}`);
 }
 
 const handleWeatherMode = (modes: string[]) => {
     currentWeatherMode.value = modes;
     refreshRainEffect();
-    renderDataBars();
+    refreshCloudEffect(); 
+    renderWeatherWidgets();
 }
 
-// 👀 Watch for Selection Changes to update bars
+// 👀 Watch for Selection Changes
 watch(selectedLocation, (newLoc) => {
     if (newLoc) {
         const data = getTownData(newLoc.name);
         currentWeatherData.value = data;
 
-        // 📏 Calculate Radius from Municipality Geometry
         if (municipalitiesDataSource) {
              const entities = municipalitiesDataSource.entities.values;
              const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
              
-             // Find matching entity
              const entity = entities.find(e => {
                  const raw = e.properties?.NOMBRE_MPI?.getValue();
                  return raw && normalize(raw) === normalize(newLoc.name);
@@ -529,11 +715,8 @@ watch(selectedLocation, (newLoc) => {
                  if (hierarchy) {
                      const bs = BoundingSphere.fromPoints(hierarchy.positions);
                      currentRainRadius.value = bs.radius * 0.9; 
-                     currentPolygonCenter.value = bs.center; // 📍 Store Center!
+                     currentPolygonCenter.value = bs.center; 
                      
-                     console.log(`[Rain] Auto-radius for ${newLoc.name}: ${currentRainRadius.value.toFixed(0)}m`);
-                     
-                     // 📐 Compute Local Polygon for Shape Emitter
                      const localPoly = computeLocalPolygon(hierarchy.positions, bs.center);
                      currentLocalPolygon.value = localPoly.polygon;
                      currentLocalBounds.value = localPoly.bounds;
@@ -549,7 +732,8 @@ watch(selectedLocation, (newLoc) => {
         currentPolygonCenter.value = null;
     }
     refreshRainEffect();
-    renderDataBars();
+    refreshCloudEffect();
+    renderWeatherWidgets();
 })
 
 const resetCamera = () => {
@@ -566,18 +750,26 @@ onMounted(async () => {
   if (cesiumContainer.value) {
     Ion.defaultAccessToken = import.meta.env.VITE_CESIUM_ION_TOKEN
 
-    // 🗺️ Configure Imagery Provider (Default to Stadia)
+    // 🗺️ Configure Imagery Provider (Default to Stadia or CartoDB Dark Matter)
     const stadiaApiKey = import.meta.env.VITE_STADIA_API_KEY
-    let imageryProvider
+    let imageryProvider: UrlTemplateImageryProvider
 
-    // Always try to use Stadia (with or without API key)
+    // Always try to use Stadia (with or without API key), in both DEV and PROD as requested
     if (stadiaApiKey) {
       // Use Stadia Maps with API key for best quality
       imageryProvider = new UrlTemplateImageryProvider({
         url: `https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}.png?api_key=${stadiaApiKey}`,
         credit: '© Stadia Maps © OpenMapTiles © OpenStreetMap contributors'
       })
-      console.log('Using Stadia Maps with API key')
+      console.log('Using Stadia Maps with API key (PROD)')
+    } else {
+        // Fallback: Use CartoDB Dark Matter (often free for dev, good dark alternative)
+        imageryProvider = new UrlTemplateImageryProvider({
+            url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+            credit: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+            subdomains: ['a', 'b', 'c', 'd']
+        })
+        console.log('Using CartoDB Dark Matter (Fallback for Stadia)')
     }
     // Note: If no API key, Cesium will use its default imagery (Bing)
     // User can manually switch to Stadia via base layer picker if using Cesium Ion
@@ -585,6 +777,8 @@ onMounted(async () => {
     // Assign to top-level variable
     cesiumViewer = new Viewer(cesiumContainer.value, {
       terrainProvider: await createWorldTerrainAsync({}),
+      // @ts-ignore
+      imageryProvider: imageryProvider, // 🗺️ Use Stadia (or default if null)
       timeline: false,
       animation: false, // ❌ Disable Animation Dial
       infoBox: false,
@@ -598,9 +792,26 @@ onMounted(async () => {
     })
 
     // Set custom imagery provider if Stadia API key is available
+    // Set custom imagery provider
     if (imageryProvider) {
       cesiumViewer.imageryLayers.removeAll()
       cesiumViewer.imageryLayers.addImageryProvider(imageryProvider)
+
+      // 📌 Add to BaseLayerPicker so switching works
+      // We name it "Stadia Alidade Smooth Dark" to match WeatherOverlay logic
+      const darkViewModel = new ProviderViewModel({
+          name: 'Stadia Alidade Smooth Dark',
+          tooltip: 'Dark Map Style',
+          iconUrl: 'https://raw.githubusercontent.com/CesiumGS/cesium/master/Apps/Sandcastle/images/3.jpg', // Placeholder icon
+          creationFunction: () => imageryProvider
+      })
+
+      // Add to list and select it
+      if (cesiumViewer.baseLayerPicker) {
+          const viewModel = cesiumViewer.baseLayerPicker.viewModel
+          viewModel.imageryProviderViewModels.push(darkViewModel)
+          viewModel.selectedImagery = darkViewModel
+      }
     }
 
     if (cesiumViewer.scene) {
@@ -789,7 +1000,10 @@ onMounted(async () => {
             
             // 📊 Initial Bar Render
             setTimeout(() => {
-                renderDataBars();
+            // 📊 Initial Widget Render
+            setTimeout(() => {
+                renderWeatherWidgets();
+            }, 1000); // Small delay to ensure entities are ready/shifted
             }, 1000); // Small delay to ensure entities are ready/shifted
 
             // 🎥 Fly to Antioquia
