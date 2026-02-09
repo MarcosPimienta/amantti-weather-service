@@ -415,6 +415,35 @@ const updateCloudSettings = (newSettings: any) => {
 // ------------------------------------------------------------------
 // 🌡️ Create Shape-Based Temperature Gradient (Inner Glow)
 // ------------------------------------------------------------------
+// Helper: Get Color from Heatmap Scale (0..1)
+const getHeatmapColor = (t: number): [number, number, number] => {
+    // 0.0: Blue (0, 0, 255)
+    // 0.25: Cyan (0, 255, 255)
+    // 0.5: Green (0, 255, 0)
+    // 0.75: Yellow (255, 255, 0)
+    // 1.0: Red (255, 0, 0)
+
+    t = Math.max(0, Math.min(1, t));
+
+    if (t < 0.25) {
+        // Blue -> Cyan
+        const localT = t / 0.25;
+        return [0, Math.floor(localT * 255), 255];
+    } else if (t < 0.5) {
+        // Cyan -> Green
+        const localT = (t - 0.25) / 0.25;
+        return [0, 255, Math.floor(255 * (1 - localT))];
+    } else if (t < 0.75) {
+        // Green -> Yellow
+        const localT = (t - 0.5) / 0.25;
+        return [Math.floor(localT * 255), 255, 0];
+    } else {
+        // Yellow -> Red
+        const localT = (t - 0.75) / 0.25;
+        return [255, Math.floor(255 * (1 - localT)), 0];
+    }
+}
+
 const createShapeGradient = (positions: Cartesian3[], center: Cartesian3, temp: number, maxTemp: number = 35) => {
     // 1. Get Local 2D Polygon (normalized 0..1 relative to bounds)
     // We reuse the logic but need to map to canvas 0..512 ignoring aspect ratio (Cesium handles UV stretch)
@@ -472,40 +501,20 @@ const createShapeGradient = (positions: Cartesian3[], center: Cartesian3, temp: 
     // 3. Mask with Original Polygon (Sharp).
     // This gives soft edges inside, sharp edges outside.
     
-    // Customize Colors: Combine "Cyber Glow" shape with "Temperature" Heatmap
-    // Mix between Edge Color (Deep Blue) and Center Color (Temp Dependent)
+    // Customize Colors: "Spatial Heatmap"
+    // The glow radiates from the center, following the shape contours.
+    // The color at any point represents a "local temperature" in that gradient field.
+    // Center = Actual Temp. Edge = Cooler Base Temp.
     
-    // 1. Calculate Center Color (Heatmap)
-    let r, g, b;
-    if (tempRatio < 0.5) {
-        // Blue to Yellow
-        const t = tempRatio * 2;
-        r = Math.floor(t * 255);
-        g = Math.floor(t * 255);
-        b = Math.floor(255 * (1 - t));
-    } else {
-        // Yellow to Red
-        const t = (tempRatio - 0.5) * 2;
-        r = 255;
-        g = Math.floor(255 * (1 - t));
-        b = 0;
-    }
-    
-    // 2. Edge Color (Deep Blue/Transparent)
-    const baseR = 0, baseG = 20, baseB = 100;
-    
-    // Apply Blur to the specific Shape
-    ctx.filter = 'blur(20px)'; // Adjust blur amount based on size
-    // Re-draw polygon with white (intensity)
-    ctx.fill();
-    ctx.filter = 'none';
+    // Base Temp for the edge of the glow (e.g., 20°C seems reasonable as a "cool" floor)
+    // Or relative? Let's say Edge is 0 value, Center is 1 value.
+    // We map Value to Color Ramp based on (Top Temp / Max Global Temp).
     
     // Get Data
     const imgData = ctx.getImageData(0, 0, size, size);
     const data = imgData.data;
     
-    // Simple Distance-ish Map:
-    // Intensity (Alpha/White) determines mix between EdgeColor and CenterColor
+    // Intensity (Alpha/White) determines "Distance from Edge"
     for (let i = 0; i < data.length; i += 4) {
         const intensity = data[i + 3] ?? 0; // Alpha channel (from blur)
         
@@ -516,16 +525,23 @@ const createShapeGradient = (positions: Cartesian3[], center: Cartesian3, temp: 
         
         const alpha = intensity / 255; // 0..1 (1 = Center/Thick, 0 = Edge)
         
-        // Non-Linear map to make the core distinct
-        const mix = Math.pow(alpha, 1.5); 
+        // Non-Linear map to push the "hot" values towards the center visually
+        // t represents normalized position in the gradient (0 = Edge, 1 = Center)
+        const t = Math.pow(alpha, 1.2); 
         
-        // Mix Colors
-        data[i] = (r * mix) + (baseR * (1 - mix));
-        data[i + 1] = (g * mix) + (baseG * (1 - mix));
-        data[i + 2] = (b * mix) + (baseB * (1 - mix));
+        // Calculate "Effective Temperature Ratio" for this pixel
+        // Center reaches 'tempRatio'. Edge starts at 0 (Deep Blue).
+        const pixelRatio = t * tempRatio; 
+        
+        // Get Color for this ratio
+        const [rVal, gVal, bVal] = getHeatmapColor(pixelRatio);
 
-        // Alpha: heavily fade edges
-        data[i + 3] = Math.max(0, Math.floor(mix * 200)); 
+        data[i] = rVal;
+        data[i + 1] = gVal;
+        data[i + 2] = bVal;
+
+        // Alpha: heavily fade edges, keep center relatively opaque
+        data[i + 3] = Math.max(0, Math.floor(t * 180)); 
     }
     
     // Put back
@@ -624,7 +640,8 @@ const renderWeatherWidgets = async () => {
     if (!selectedLocation.value) return;
 
     const activeModes = currentWeatherMode.value;
-    if (activeModes.length === 0) return;
+    // Don't return early here! We must loop to RESET the polygons if modes are empty.
+    // if (activeModes.length === 0) return;
     
     if (!municipalitiesDataSource) return;
 
@@ -664,27 +681,33 @@ const renderWeatherWidgets = async () => {
         
         if (!center) continue;
 
-        // Apply Glow Gradient
-        const material = new ImageMaterialProperty({
-             image: createShapeGradient(positions, center, data.temp, 40), 
-             transparent: true
-        });
-        entity.polygon.material = material;
+        // Apply Glow Gradient ONLY if 'clear' (Temperature) mode is active
+        if (activeModes.includes('clear')) {
+             const material = new ImageMaterialProperty({
+                  image: createShapeGradient(positions, center, data.temp, 40), 
+                  transparent: true
+             });
+             entity.polygon.material = material;
+        }
         
-        // 2. Add Floating Widget
-        // Add Billboard
-        barDataSource.entities.add({
-             position: center, // Centroid
-             billboard: {
-                 image: createWidgetCanvas(rawName, data),
-                 scale: 1.0,
-                 pixelOffset: new Cartesian2(0, -100), // Float up
-                 verticalOrigin: VerticalOrigin.BOTTOM,
-                 disableDepthTestDistance: Number.POSITIVE_INFINITY, // Always on top? Or allow occlude?
-                 // Let's allow occlusion naturally, but maybe offset z?
-                 heightReference: HeightReference.RELATIVE_TO_GROUND
-             }
-        });
+        // 2. Add Floating Widget ONLY if modes are active?
+        // Or should we show it always if selected?
+        // User said "disabling enabling the panel" implying they expect panel to toggle.
+        // So let's respect that: only show if at least one mode is active.
+        if (activeModes.length > 0) {
+            barDataSource.entities.add({
+                 position: center, // Centroid
+                 billboard: {
+                     image: createWidgetCanvas(rawName, data),
+                     scale: 1.0,
+                     pixelOffset: new Cartesian2(0, -100), // Float up
+                     verticalOrigin: VerticalOrigin.BOTTOM,
+                     disableDepthTestDistance: Number.POSITIVE_INFINITY, // Always on top? Or allow occlude?
+                     // Let's allow occlusion naturally, but maybe offset z?
+                     heightReference: HeightReference.RELATIVE_TO_GROUND
+                 }
+            });
+        }
     }
 }
 
