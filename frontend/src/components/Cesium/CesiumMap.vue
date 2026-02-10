@@ -37,10 +37,11 @@ import {
   CloudCollection,
   ProviderViewModel,
   VerticalOrigin,
-  EllipsoidGraphics,
-  Quaternion,
   HeadingPitchRoll,
-  Matrix2
+  Matrix2,
+  BillboardCollection,
+  Quaternion,
+  EllipsoidGraphics
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -65,7 +66,7 @@ let rainSystem: ParticleSystem | null = null
 let barDataSource: CustomDataSource | null = null
 let fogDataSource: CustomDataSource | null = null // 🌫️ Fog Polygons
 let municipalitiesDataSource: GeoJsonDataSource | null = null // 📍 Added reliable reference
-let cloudCollection: CloudCollection | null = null; // ☁️ Clouds
+let cloudCollection: BillboardCollection | null = null; // ☁️ Clouds (Billboards)
 
 // Mock Data Cache to keep values consistent
 const townDataCache: Record<string, { temp: number, rain: number, humidity: number }> = {}
@@ -337,16 +338,19 @@ const refreshCloudEffect = () => {
     console.log(`[CloudDebug] Settings:`, cloudSettings.value);
 
     // Show clouds on rain or if humidity is high
-    if (currentWeatherMode.value.includes('humidity') && (currentWeatherMode.value.includes('rain') || data.humidity > 60)) {
-         cloudCollection = new CloudCollection({
-             noiseDetail: 16.0, // Fixed detail for Cumulus
-             noiseOffset: Math.random() * 1000.0
-         });
+    if (currentWeatherMode.value.includes('humidity')) {
 
-         const count = cloudSettings.value.count;
-         console.log(`[CloudDebug] Spawning ${count} clouds...`);
+         if (!cloudCollection) {
+             cloudCollection = new BillboardCollection();
+             cesiumViewer.scene.primitives.add(cloudCollection);
+         }
 
-        if (currentPolygonCenter.value && currentLocalPolygon.value.length > 0) {
+         const count = Math.min(cloudSettings.value.count, 20); // Limit count for billboards as they are large
+         console.log(`[CloudDebug] Spawning ${count} billboard clouds...`);
+
+         const cloudTexture = createCloudBillboardTexture(); // Assuming this is defined below
+
+         if (currentPolygonCenter.value && currentLocalPolygon.value.length > 0) {
              const center = currentPolygonCenter.value;
              const toFixed = Transforms.eastNorthUpToFixedFrame(center);
              const bounds = currentLocalBounds.value;
@@ -362,58 +366,92 @@ const refreshCloudEffect = () => {
                  
                  if (pointInPolygon({x, y}, polygon)) {
                      // Inside!
-                     const z = CesiumMath.randomBetween(cloudSettings.value.altitude - 500, cloudSettings.value.altitude + 500); 
+                     const z = CesiumMath.randomBetween(cloudSettings.value.altitude - 200, cloudSettings.value.altitude + 200); 
                      
                      const localPos = new Cartesian3(x, y, z);
                      const worldPos = Matrix4.multiplyByPoint(toFixed, localPos, new Cartesian3());
                      
-                     // ☁️ Cumulus Cloud Properties
-                     const maxWidth = cloudSettings.value.maxSizeX;
-                     const maxLength = cloudSettings.value.maxSizeY;
-                     const maxHeight = cloudSettings.value.maxSizeZ;
+
+                     // ☁️ Physically Sized Billboards
+                     // Base size in meters (e.g. 3000m wide)
+                     const baseWidth = 30000; 
+                     const baseHeight = 25000;
                      
-                     // Randomize slightly based on max size
-                     const sizeX = maxWidth * (0.8 + Math.random() * 0.4);
-                     const sizeY = maxLength * (0.8 + Math.random() * 0.4);
-                     const sizeZ = maxHeight * (0.8 + Math.random() * 0.4);
-                     
-                     const texScale = cloudSettings.value.textureScale;
+                     // Random Scale for variety
+                     const scale = 0.8 + Math.random() * 0.4; 
 
                      cloudCollection.add({
                          position: worldPos,
-                         scale: new Cartesian2(texScale, texScale), 
-                         maximumSize: new Cartesian3(sizeX, sizeY, sizeZ), 
-                         slice: cloudSettings.value.slice, 
-                         brightness: cloudSettings.value.brightness 
+                         image: cloudTexture,
+                         // 📏 Key Change: Use manual width/height in METERS
+                         width: baseWidth * scale,
+                         height: baseHeight * scale,
+                         sizeInMeters: true, // ❤️ Keeps size constant in world, scales in screen
+                         rotation: 0,
+                         verticalOrigin: VerticalOrigin.CENTER,
+                         color: Color.WHITE.withAlpha(0.9)
                      });
 
                      added++;
                  }
                  attempts++;
              }
-             console.log(`[CloudDebug] Polygon Spawn: Added ${added} clouds.`);
+             console.log(`[CloudDebug] Polygon Spawn: Added ${added} billboard clouds.`);
          } else {
              // Fallback for no polygon
              const center = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + cloudSettings.value.altitude);
-             const spread = 20000; 
+             const spread = 8000; 
 
              for (let i = 0; i < count; i++) {
                  const x = center.x + (Math.random() - 0.5) * spread;
                  const y = center.y + (Math.random() - 0.5) * spread;
-                 const z = center.z + (Math.random() - 0.5) * 1000;
+                 const z = center.z + (Math.random() - 0.5) * 500;
 
                  cloudCollection.add({
                      position: new Cartesian3(x, y, z),
-                     scale: new Cartesian2(cloudSettings.value.textureScale, cloudSettings.value.textureScale),
-                     maximumSize: new Cartesian3(cloudSettings.value.maxSizeX, cloudSettings.value.maxSizeY, cloudSettings.value.maxSizeZ),
-                     slice: cloudSettings.value.slice,
-                     brightness: cloudSettings.value.brightness
+                     image: cloudTexture,
+                     width: 5000 * (0.8 + Math.random()), 
+                     height: 3000 * (0.8 + Math.random()),
+                     sizeInMeters: true,
+                     rotation: 0,
+                     verticalOrigin: VerticalOrigin.CENTER,
+                     color: Color.WHITE.withAlpha(0.9)
                  });
              }
          }
-         
-         cesiumViewer.scene.primitives.add(cloudCollection);
     }
+}
+
+// ☁️ Helper: Create a Fluffy Cloud Texture for Billboards
+const createCloudBillboardTexture = () => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return canvas;
+
+    // Clear
+    ctx.clearRect(0,0,size,size);
+
+    // Draw multiple soft radial puffs to form a cloud shape
+    const puffs = 8;
+    for(let i=0; i<puffs; i++) {
+        const x = size/2 + (Math.random()-0.5) * 100;
+        const y = size/2 + (Math.random()-0.5) * 60; // Flatter
+        const r = 40 + Math.random() * 40;
+        
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0, 'rgba(255, 255, 255, 0.8)');
+        grad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI*2);
+        ctx.fill();
+    }
+    
+    return canvas;
 }
 
 const updateCloudSettings = (newSettings: any) => {
@@ -859,20 +897,9 @@ const renderWeatherWidgets = async () => {
                  const radiusY = bounds.height * 0.55; 
                  
                  // Height: Proportional to the average size, but flattened
-                 const avgSize = (radiusX + radiusY) / 2;
-                 const height = avgSize * 0.5; 
-
-                 fogDataSource.entities.add({
-                     position: bounds.center,
-                     orientation: bounds.rotation,
-                     ellipsoid: new EllipsoidGraphics({
-                         radii: new Cartesian3(radiusX, radiusY, height),
-                         material: new ImageMaterialProperty({
-                             image: createDomeFogTexturedMaterial(data.humidity),
-                             transparent: true
-                         }),
-                     })
-                 });
+                 if (activeModes.includes('humidity')) {
+                     // Cloud collection is handled in refreshCloudEffect, not here.
+                 }
              }
         }
 
