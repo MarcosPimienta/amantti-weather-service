@@ -366,12 +366,23 @@ const refreshCloudEffect = () => {
                  
                  if (pointInPolygon({x, y}, polygon)) {
                      // Inside!
-                     // ☁️ Randomized Dimensions (Ranges)
-                     const minWidth = 15000;
-                     const maxWidth = 25500;
-                     const minHeight = 12500;
-                     const maxHeight = 20000;
+                     // ☁️ Randomized Dimensions (Ranges) - Interactive with Humidity
+                     // Base Ranges (User preference)
+                     const baseMinWidth = 1000;
+                     const baseMaxWidth = 2050;
+                     const baseMinHeight = 525;
+                     const baseMaxHeight = 900;
 
+                     // Humidity Factor: Map 0..100% to a size boost
+                     // Affect ranges directly (Additive) instead of Multiplicative
+                     const humidityRatio = Math.max(0, Math.min(data.humidity, 100)) / 100;
+                     const humidityBoost = humidityRatio * 10000; 
+
+                     const minWidth = baseMinWidth + humidityBoost;
+                     const maxWidth = baseMaxWidth + humidityBoost;
+                     const minHeight = baseMinHeight + humidityBoost;
+                     const maxHeight = baseMaxHeight + humidityBoost;
+ 
                      const width = CesiumMath.randomBetween(minWidth, maxWidth);
                      const height = CesiumMath.randomBetween(minHeight, maxHeight);
 
@@ -410,8 +421,11 @@ const refreshCloudEffect = () => {
                  // Vertical spread
                  const z = center.z + (Math.random() - 0.5) * 3000; 
 
-                 const width = CesiumMath.randomBetween(30000, 55000);
-                 const height = CesiumMath.randomBetween(25000, 40000);
+                 const humidityRatio = Math.max(0, Math.min(data.humidity, 100)) / 100;
+                 const humidityBoost = humidityRatio * 20000; 
+                 
+                 const width = CesiumMath.randomBetween(30000 + humidityBoost, 55000 + humidityBoost);
+                 const height = CesiumMath.randomBetween(25000 + humidityBoost, 40000 + humidityBoost);
 
                  cloudCollection.add({
                      position: new Cartesian3(x, y, z),
