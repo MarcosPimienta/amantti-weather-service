@@ -41,7 +41,8 @@ import {
   Matrix2,
   BillboardCollection,
   Quaternion,
-  EllipsoidGraphics
+  EllipsoidGraphics,
+  HeadingPitchRange
 } from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 
@@ -114,6 +115,65 @@ const handleLayerSwitch = (layerName: string) => {
     }
     if (target) {
         cesiumViewer.baseLayerPicker.viewModel.selectedImagery = target
+    }
+}
+
+// 🏙️ Available Towns List
+const availableTowns = ref([
+    'Jardín',
+    'Andes',
+    'Betania',
+    'Ciudad Bolívar',
+    'Támesis',
+    'Urrao',
+    'Hispania',
+    'Fredonia',
+    'La Pintada',
+    'Amagá',
+    'Santa Bárbara',
+    'Venecia',
+    'Abejorral',
+    'El Retiro',
+    'San Rafael',
+].sort());
+
+const handleTownSelect = (townName: string) => {
+    if (!municipalitiesDataSource || !cesiumViewer) return;
+
+    const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const targetName = normalize(townName);
+
+    const entities = municipalitiesDataSource.entities.values;
+    const entity = entities.find(e => {
+        const raw = e.properties?.NOMBRE_MPI?.getValue();
+        return raw && normalize(raw) === targetName;
+    });
+
+    if (entity) {
+        // Compute Centroid
+        const hierarchy = entity.polygon?.hierarchy?.getValue(cesiumViewer.clock.currentTime);
+        if (hierarchy) {
+            const bs = BoundingSphere.fromPoints(hierarchy.positions);
+            const center = bs.center;
+            
+            // Convert to Geo for Camera FlyTo
+            const carto = Cartographic.fromCartesian(center);
+            
+            // Set Selection
+            // Set Selection
+             selectedLocation.value = {
+                name: entity.properties?.NOMBRE_MPI?.getValue(), // Use raw name for matching
+                lat: CesiumMath.toDegrees(carto.latitude),
+                lon: CesiumMath.toDegrees(carto.longitude),
+                alt: 1250 // Approx
+            };
+
+            // Fly Camera
+            cesiumViewer.camera.flyToBoundingSphere(bs, {
+                duration: 2.0,
+                offset: new HeadingPitchRange(0, -0.5, 0) 
+            });
+        }
     }
 }
 
@@ -1181,25 +1241,10 @@ onMounted(async () => {
             await cesiumViewer.dataSources.add(dataSource)
             municipalitiesDataSource = dataSource // 📍 Store reference
 
-            // List of municipalities to highlight
-            const rawTargetTowns = [
-            'Jardín',
-            'Andes',
-            'Betania',
-            'Ciudad Bolívar',
-            'Támesis',
-            'Urrao',
-            'Hispania',
-            'Fredonia',
-            'La Pintada',
-            'Amagá',
-            'Santa Bárbara',
-            'Venecia',
-            'Abejorral',
-            'El Retiro',
-            'San Rafael',
-            ]
+            municipalitiesDataSource = dataSource // 📍 Store reference
 
+            // List of municipalities to highlight (Already defined in availableTowns)
+            
             // Normalization helper: uppercase + remove accents
             const normalize = (str: string) => str.toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
 
@@ -1208,7 +1253,7 @@ onMounted(async () => {
                 "EL RETIRO": "RETIRO"
             }
 
-            const targetTowns = rawTargetTowns.map(t => {
+            const targetTowns = availableTowns.value.map(t => {
                 const upper = t.toUpperCase()
                 return aliasMap[upper] || normalize(upper)
             })
@@ -1320,9 +1365,11 @@ onMounted(async () => {
     <WeatherOverlay 
         :location="selectedLocation" 
         :weather-data="currentWeatherData"
+        :towns="availableTowns"
         @switch-layer="handleLayerSwitch" 
         @weather-mode="handleWeatherMode" 
         @reset-camera="resetCamera"
+        @select-town="handleTownSelect"
     />
   </div>
 </template>

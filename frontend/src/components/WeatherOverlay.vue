@@ -85,6 +85,22 @@
         </div>
       </div>
 
+      <!-- 🏙️ Town Selection Panel -->
+      <div class="glass-card towns-panel" v-if="towns && towns.length > 0">
+        <h3>Locations</h3>
+        <div class="town-list">
+          <div 
+            v-for="town in towns" 
+            :key="town"
+            class="town-item"
+            :class="{ active: location?.name === town }"
+            @click="emit('select-town', town)"
+          >
+            {{ town }}
+          </div>
+        </div>
+      </div>
+
       <!-- Aggregated Summaries -->
       <div class="glass-card summary-card">
         <h3>Region Summary</h3>
@@ -162,12 +178,14 @@ const emit = defineEmits<{
   (e: 'switch-layer', layerName: string): void
   (e: 'weather-mode', modes: string[]): void
   (e: 'reset-camera'): void
+  (e: 'select-town', townName: string): void
 }>()
 
 const props = defineProps<{
   location: LocationData | null
   summary?: SummaryData
   weatherData?: WeatherData | null
+  towns?: string[]
 }>()
 
 // Default summary if not provided
@@ -461,5 +479,57 @@ h3 {
 
 .stat-item.inactive .stat-value {
   color: rgba(255, 255, 255, 0.3);
+}
+
+/* Town List */
+.towns-panel {
+  flex-grow: 1; /* Take up available space */
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* Allow flex shrinking with scroll */
+  max-height: 300px; /* Limit height */
+}
+
+.town-list {
+  overflow-y: auto;
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-right: 0.5rem; /* Space for scrollbar */
+}
+
+/* Custom Scrollbar */
+.town-list::-webkit-scrollbar {
+  width: 4px;
+}
+.town-list::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+}
+.town-list::-webkit-scrollbar-thumb {
+  background: rgba(165, 243, 252, 0.3);
+  border-radius: 4px;
+}
+
+.town-item {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.8);
+  border: 1px solid transparent;
+}
+
+.town-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.town-item.active {
+  background: rgba(165, 243, 252, 0.15);
+  color: #a5f3fc;
+  border-color: rgba(165, 243, 252, 0.3);
+  font-weight: 600;
 }
 </style>
