@@ -316,7 +316,7 @@ const cloudSettings = ref({
     textureScale: 20, 
     slice: 0.5,
     brightness: 1.0,
-    altitude: 5000,
+    altitude: 9000,
     count: 30
 });
 
@@ -366,32 +366,33 @@ const refreshCloudEffect = () => {
                  
                  if (pointInPolygon({x, y}, polygon)) {
                      // Inside!
-                     const z = CesiumMath.randomBetween(cloudSettings.value.altitude - 200, cloudSettings.value.altitude + 200); 
+                     // ☁️ Randomized Dimensions (Ranges)
+                     const minWidth = 15000;
+                     const maxWidth = 25500;
+                     const minHeight = 12500;
+                     const maxHeight = 20000;
+
+                     const width = CesiumMath.randomBetween(minWidth, maxWidth);
+                     const height = CesiumMath.randomBetween(minHeight, maxHeight);
+
+                     // "Depth" (Vertical Thickness of the cloud layer)
+                     const depthHalf = 1500; // +/- 1500m
+                     const z = CesiumMath.randomBetween(cloudSettings.value.altitude - depthHalf, cloudSettings.value.altitude + depthHalf);
                      
                      const localPos = new Cartesian3(x, y, z);
                      const worldPos = Matrix4.multiplyByPoint(toFixed, localPos, new Cartesian3());
-                     
-
-                     // ☁️ Physically Sized Billboards
-                     // Base size in meters (e.g. 3000m wide)
-                     const baseWidth = 30000; 
-                     const baseHeight = 25000;
-                     
-                     // Random Scale for variety
-                     const scale = 0.8 + Math.random() * 0.4; 
 
                      cloudCollection.add({
                          position: worldPos,
                          image: cloudTexture,
-                         // 📏 Key Change: Use manual width/height in METERS
-                         width: baseWidth * scale,
-                         height: baseHeight * scale,
+                         width: width,
+                         height: height,
                          sizeInMeters: true, // ❤️ Keeps size constant in world, scales in screen
-                         rotation: 0,
+                         rotation: 0, 
                          verticalOrigin: VerticalOrigin.CENTER,
                          color: Color.WHITE.withAlpha(0.9)
                      });
-
+                     
                      added++;
                  }
                  attempts++;
@@ -400,18 +401,23 @@ const refreshCloudEffect = () => {
          } else {
              // Fallback for no polygon
              const center = Cartesian3.fromDegrees(location.lon, location.lat, location.alt + cloudSettings.value.altitude);
-             const spread = 8000; 
+             const spread = 15000; 
 
              for (let i = 0; i < count; i++) {
                  const x = center.x + (Math.random() - 0.5) * spread;
                  const y = center.y + (Math.random() - 0.5) * spread;
-                 const z = center.z + (Math.random() - 0.5) * 500;
+                 
+                 // Vertical spread
+                 const z = center.z + (Math.random() - 0.5) * 3000; 
+
+                 const width = CesiumMath.randomBetween(30000, 55000);
+                 const height = CesiumMath.randomBetween(25000, 40000);
 
                  cloudCollection.add({
                      position: new Cartesian3(x, y, z),
                      image: cloudTexture,
-                     width: 5000 * (0.8 + Math.random()), 
-                     height: 3000 * (0.8 + Math.random()),
+                     width: width, 
+                     height: height,
                      sizeInMeters: true,
                      rotation: 0,
                      verticalOrigin: VerticalOrigin.CENTER,
