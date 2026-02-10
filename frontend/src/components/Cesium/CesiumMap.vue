@@ -337,7 +337,7 @@ const refreshCloudEffect = () => {
     console.log(`[CloudDebug] Settings:`, cloudSettings.value);
 
     // Show clouds on rain or if humidity is high
-    if (currentWeatherMode.value.includes('rain') || (currentWeatherMode.value.includes('humidity') && data.humidity > 60)) {
+    if (currentWeatherMode.value.includes('humidity') && (currentWeatherMode.value.includes('rain') || data.humidity > 60)) {
          cloudCollection = new CloudCollection({
              noiseDetail: 16.0, // Fixed detail for Cumulus
              noiseOffset: Math.random() * 1000.0
